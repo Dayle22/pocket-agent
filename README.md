@@ -1,8 +1,17 @@
 # Pocket Agent
 
-A floating Windows desktop AI companion powered by the **Agent Client Protocol (ACP)**, animated PyQt6 sprites, and GPU Voice Orbs.
+[![Latest Release](https://img.shields.io/github/v/release/Dayle22/pocket-agent?style=flat-square)](https://github.com/Dayle22/pocket-agent/releases/latest)
+[![GitHub Downloads](https://img.shields.io/github/downloads/Dayle22/pocket-agent/total?style=flat-square)](https://github.com/Dayle22/pocket-agent/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square)](https://github.com/Dayle22/pocket-agent/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
-Works with any ACP-compatible CLI agent on your machine:
+**Use Claude Code, Gemini CLI, Codex, OpenCode, or Antigravity from a floating Windows desktop buddy with voice and live tool diffs, powered by your existing CLI login (no API keys required).**
+
+[**Download Latest Windows Release (.zip)**](https://github.com/Dayle22/pocket-agent/releases/latest) | [How to Connect an AI CLI](#connecting-an-ai-agent) | [Build from Source](#run-from-source--build-windows-exe)
+
+![Pocket Agent live desktop companion, chat drawer, and GLSL Voice Orb](docs/demo.gif)
+
+Pocket Agent is powered by the **Agent Client Protocol (ACP)**, animated PyQt6 sprites, and GPU Voice Orbs. It works with any ACP-compatible CLI agent on your machine:
 - **Antigravity CLI** (`agy acp`)
 - **Gemini CLI** (`gemini --acp`)
 - **Codex** (`codex-acp`)
@@ -18,12 +27,19 @@ Works with any ACP-compatible CLI agent on your machine:
 - **Built-in PocketBot sprite** plus automatic discovery of 192x208 8x9 sprite packs (configure `pets_dirs` in `~/.pocket-agent/config.json`).
 - **System tray + Windows Startup toggle** so Pocket Agent runs quietly in the background without keeping a terminal open.
 
+![4 built-in GPU GLSL Voice Orbs](docs/voice-orbs.png)
+
 ## Download & Run (Windows, No Terminal Needed)
 
-1. Download the latest `PocketAgent-v*-win64.zip` from [**GitHub Releases**](https://github.com/Dayle22/pocket-agent/releases).
+1. Download the latest `PocketAgent-v*-win64.zip` from [**GitHub Releases**](https://github.com/Dayle22/pocket-agent/releases/latest).
 2. Extract the zip anywhere (for example `C:\Apps\PocketAgent\`).
 3. Double-click **`PocketAgent.exe`** (no Python install or terminal window required).
 4. *(Optional)* Enable **Launch at Windows Startup** from the system tray menu or **Settings**.
+
+> **Windows SmartScreen notice:** Because `PocketAgent.exe` is an unsigned open-source build, Windows Defender SmartScreen may show *"Windows protected your PC"* on first launch. Click **More info -> Run anyway**, and feel free to verify your download against the `.sha256` file attached to each release:
+> ```powershell
+> Get-FileHash .\PocketAgent-v*-win64.zip -Algorithm SHA256
+> ```
 
 > **Prerequisite:** Make sure you have Windows 10/11 and at least one ACP-compatible CLI installed and signed in on your `PATH` (see [Connecting an AI Agent](#connecting-an-ai-agent) below).
 

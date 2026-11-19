@@ -76,6 +76,14 @@ jobs:
       - name: Build Python sdist and wheel
         run: python -m build
 
+      - name: Upload Python distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -87,3 +95,25 @@ jobs:
             dist/PocketAgent-${{ steps.meta.outputs.tag }}-win64.zip.sha256
             dist/*.whl
             dist/*.tar.gz
+
+  # Optional PyPI publishing via Trusted Publishers (OIDC).
+  # To enable: add this repo/workflow in PyPI -> Publishing, create a 'pypi'
+  # GitHub Environment, and set repository variable PYPI_PUBLISH = true.
+  publish-pypi:
+    needs: build-windows-release
+    if: ${{ vars.PYPI_PUBLISH == 'true' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pocket-agent
+    permissions:
+      id-token: write
+    steps:
+      - name: Download Python distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
