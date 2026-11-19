@@ -5,3 +5,12 @@ __pycache__/
 .pytest_cache/
 dist/
 build/
+*.log
+.coverage
+coverage/
+.ruff_cache/
+.mypy_cache/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

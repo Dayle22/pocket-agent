@@ -565,6 +565,12 @@ def _draw_icon_path(p: QPainter, name: str, color: QColor) -> None:
     elif name == "power":
         p.drawLine(QPointF(12, 2.5), QPointF(12, 11))
         p.drawArc(QRectF(4, 5, 16, 16), 50 * 16, -280 * 16)
+    elif name == "refresh-cw":
+        p.drawArc(QRectF(4.5, 4.5, 15, 15), 35 * 16, 260 * 16)
+        head = QPainterPath(QPointF(16.5, 4.5))
+        head.lineTo(QPointF(20.0, 4.5))
+        head.lineTo(QPointF(20.0, 8.0))
+        p.drawPath(head)
     elif name == "message-square":
         bubble = QPainterPath(QPointF(21, 15))
         bubble.quadTo(QPointF(21, 17), QPointF(19, 17))

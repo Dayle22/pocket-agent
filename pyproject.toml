@@ -7,20 +7,57 @@ name = "pocket-agent"
 version = "0.1.0"
 description = "Floating Windows AI companion powered by Agent Client Protocol (ACP) and animated sprites"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
+authors = [{ name = "Dayle22" }]
+keywords = ["ai", "acp", "agent-client-protocol", "desktop-pet", "pyqt6", "voice-orb"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Desktop Environment",
+]
 dependencies = [
     "PyQt6>=6.4.0",
     "Pillow>=9.0.0",
     "agent-client-protocol>=1.0.0",
     "edge-tts>=6.1.0",
+    "aiohttp>=3.9.0",
+    "certifi>=2024.2.2",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pyinstaller>=6.0.0",
+    "build>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Dayle22/pocket-agent"
+Repository = "https://github.com/Dayle22/pocket-agent"
+Issues = "https://github.com/Dayle22/pocket-agent/issues"
+Changelog = "https://github.com/Dayle22/pocket-agent/blob/main/CHANGELOG.md"
 
 [project.scripts]
 pocket-agent = "pocket_agent.app:main"
 
+[project.gui-scripts]
+pocket-agent-gui = "pocket_agent.app:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["pocket_agent*"]
+
+[tool.setuptools.package-data]
+pocket_agent = ["assets/*.png", "assets/*.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

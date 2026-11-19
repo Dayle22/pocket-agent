@@ -162,8 +162,12 @@ def test_working_bubble_only_shows_when_drawer_minimised(qapp, monkeypatch, tmp_
     finally:
         app._working_phrase_timer.stop()
         app._hotkey_filter.unregister()
+        qapp.removeNativeEventFilter(app._hotkey_filter)
+        app.voice.shutdown()
+        app.bridge.shutdown()
         app.pet.bubble.close()
         app.drawer.close()
         app.pet.close_tray()
         app.pet.close()
+        app.deleteLater()
         qapp.processEvents()

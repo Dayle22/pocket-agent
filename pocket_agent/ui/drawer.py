@@ -376,10 +376,13 @@ class ChatDrawer(QWidget):
     config_option_selected = pyqtSignal(str, str)  # config_id, value
     workspace_selected = pyqtSignal(str)
     new_session_requested = pyqtSignal()
+    reconnect_requested = pyqtSignal()
+    setup_guide_requested = pyqtSignal()
     permission_decided = pyqtSignal(str, object)  # request_id, option_id | None
     theme_selected = pyqtSignal(str)  # "dark" | "light" | "system"
     blur_toggled = pyqtSignal(bool)
     always_on_top_toggled = pyqtSignal(bool)
+    startup_toggled = pyqtSignal(bool)
     voice_toggled = pyqtSignal(bool)
     voice_selected = pyqtSignal(str)
     test_voice_requested = pyqtSignal()
@@ -393,6 +396,7 @@ class ChatDrawer(QWidget):
         current_agent_id: str,
         workspace: str,
         always_on_top: bool = True,
+        launch_at_startup: bool = False,
         theme_mode: str = "system",
         backdrop_blur: bool = True,
         voice_enabled: bool = True,
@@ -402,6 +406,7 @@ class ChatDrawer(QWidget):
     ) -> None:
         super().__init__(None)
         self._always_on_top = always_on_top
+        self._launch_at_startup = launch_at_startup
         self._theme_mode = theme_mode
         self._backdrop_blur = backdrop_blur
         self._voice_enabled = voice_enabled
@@ -493,6 +498,12 @@ class ChatDrawer(QWidget):
         self._voice_name = voice_name
         if hasattr(self, "_settings_page"):
             self._settings_page.set_voice_name(voice_name)
+
+    def set_launch_at_startup(self, enabled: bool) -> None:
+        """Sync Windows startup toggle on the settings page."""
+        self._launch_at_startup = enabled
+        if hasattr(self, "_settings_page"):
+            self._settings_page.set_launch_at_startup(enabled)
 
     def _apply_backdrop_now(self) -> None:
         if os.name == "nt":
@@ -636,6 +647,8 @@ class ChatDrawer(QWidget):
         iol.setSpacing(6)
 
         self._error_banner = ErrorBannerWidget(input_outer)
+        self._error_banner.reconnect_requested.connect(self.reconnect_requested.emit)
+        self._error_banner.setup_guide_requested.connect(self.setup_guide_requested.emit)
         iol.addWidget(self._error_banner)
 
         self._perm_dialog = PermissionDialogWidget(input_outer)
@@ -695,6 +708,7 @@ class ChatDrawer(QWidget):
             theme_mode=self._theme_mode,
             backdrop_blur=self._backdrop_blur,
             always_on_top=self._always_on_top,
+            launch_at_startup=self._launch_at_startup,
             show_thoughts=self._show_thoughts,
             workspace=workspace,
             parent=self._pages,
@@ -707,6 +721,7 @@ class ChatDrawer(QWidget):
         self._settings_page.theme_selected.connect(self._emit_theme_mode)
         self._settings_page.blur_toggled.connect(self._emit_blur_toggle)
         self._settings_page.always_on_top_toggled.connect(self._on_settings_always_on_top)
+        self._settings_page.startup_toggled.connect(self.startup_toggled.emit)
         self._settings_page.thoughts_toggled.connect(self._on_toggle_thoughts)
         self._settings_page.workspace_browse_requested.connect(self._pick_workspace)
         self._pages.addWidget(self._settings_page)
@@ -934,6 +949,13 @@ class ChatDrawer(QWidget):
         self._turns.append(turn)
         self._append_turn_widget(turn)
         self._error_banner.show_banner("Agent Error", text, variant="error")
+
+    def show_connection_error(self, title: str, text: str) -> None:
+        """Display a connection failure/disconnect in the transcript and banner with Retry actions."""
+        turn = ChatTurn(role="error", text=text)
+        self._turns.append(turn)
+        self._append_turn_widget(turn)
+        self._error_banner.show_banner(title, text, variant="error", show_actions=True)
 
     def append_user_message(self, text: str) -> None:
         user_turn = ChatTurn(role="user", text=text)
@@ -1265,10 +1287,14 @@ class ChatDrawer(QWidget):
             )
 
     def _on_agent_selected(self, agent_id: str) -> None:
-        if agent_id and agent_id != self._current_agent_id:
+        if not agent_id:
+            return
+        if agent_id != self._current_agent_id:
             self._current_agent_id = agent_id
             self._update_empty_state()
             self.agent_selected.emit(agent_id)
+        elif not self._session_ready:
+            self.reconnect_requested.emit()
 
     def _pick_workspace(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Choose Workspace Folder", self._workspace)
@@ -1297,6 +1323,8 @@ class ChatDrawer(QWidget):
         menu = PocketMenu(parent=self)
 
         menu.add_item("New Chat", self._on_new_chat_clicked, icon="plus")
+        menu.add_item("Reconnect Agent", self.reconnect_requested.emit, icon="refresh-cw")
+        menu.add_item("Connect an AI (Setup Guide)...", self.setup_guide_requested.emit, icon="book-open")
         menu.add_item("Change Workspace Folder...", self._pick_workspace, icon="folder")
         menu.add_item("Copy Chat as Markdown", self._export_markdown, icon="copy", enabled=bool(self._turns))
         menu.add_check("Show Thinking Blocks", self._show_thoughts, self._on_toggle_thoughts)

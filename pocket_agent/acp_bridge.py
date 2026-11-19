@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import traceback
-import uuid
+import asyncio.subprocess as aio_subprocess
+from collections import deque
+from collections.abc import AsyncIterator, Mapping
+import contextlib
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import logging
+import os
 from pathlib import Path
+import subprocess
+import traceback
 from typing import Any
+import uuid
 
 import acp
+from acp.transports import default_environment
 from acp.schema import (
     AgentMessageChunk,
     AgentPlanUpdate,
@@ -326,6 +334,118 @@ def _extract_text(content_block: Any) -> str:
     return ""
 
 
+logger = logging.getLogger("pocket_agent.acp")
+_CONNECT_TIMEOUT_SECONDS = 30.0
+
+
+def _subprocess_creation_flags() -> int:
+    """Return Windows creationflags that suppress child console windows."""
+    if os.name == "nt":
+        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+    return 0
+
+
+@asynccontextmanager
+async def _spawn_agent_process(
+    to_client: Any,
+    command: str,
+    *args: str,
+    env: Mapping[str, str] | None = None,
+    cwd: str | Path | None = None,
+    limit: int = 16 * 1024 * 1024,
+    shutdown_timeout: float = 2.0,
+) -> AsyncIterator[tuple[acp.ClientSideConnection, aio_subprocess.Process]]:
+    """Spawn an ACP stdio subprocess without flashing a Windows console window."""
+    merged_env = dict(default_environment())
+    if env:
+        merged_env.update(env)
+
+    exec_kwargs: dict[str, Any] = {
+        "stdin": aio_subprocess.PIPE,
+        "stdout": aio_subprocess.PIPE,
+        "stderr": aio_subprocess.PIPE,
+        "env": merged_env,
+        "cwd": str(cwd) if cwd is not None else None,
+        "limit": limit,
+    }
+    flags = _subprocess_creation_flags()
+    if flags:
+        exec_kwargs["creationflags"] = flags
+
+    process = await asyncio.create_subprocess_exec(command, *args, **exec_kwargs)
+    if process.stdout is None or process.stdin is None:
+        process.kill()
+        await process.wait()
+        raise RuntimeError("ACP agent subprocess requires stdout/stdin pipes")
+
+    conn = acp.ClientSideConnection(to_client, process.stdin, process.stdout)
+    try:
+        yield conn, process
+    finally:
+        with contextlib.suppress(Exception):
+            await conn.close()
+        if process.stdin is not None:
+            with contextlib.suppress(Exception):
+                process.stdin.close()
+                await asyncio.wait_for(process.stdin.wait_closed(), timeout=shutdown_timeout)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=shutdown_timeout)
+        except asyncio.TimeoutError:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=shutdown_timeout)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+
+
+def _format_connection_error(
+    spec: AgentSpec,
+    exc: Exception | str,
+    stderr_lines: list[str] | deque[str],
+) -> str:
+    """Format an actionable error message from an ACP failure and captured stderr."""
+    if isinstance(exc, asyncio.TimeoutError):
+        base = f"{spec.name} timed out after {int(_CONNECT_TIMEOUT_SECONDS)}s while starting."
+    else:
+        base = str(exc).strip() or exc.__class__.__name__
+
+    tail = [line.strip() for line in stderr_lines if line and line.strip()][-4:]
+    parts = [base]
+    if tail:
+        parts.append("CLI output: " + " | ".join(tail))
+
+    combined = f"{base} {' '.join(tail)}".lower()
+    if any(tok in combined for tok in ("login", "auth", "unauthorized", "api key", "token", "sign in")):
+        parts.append(f"Tip: run `{spec.command}` in PowerShell once to sign in, then click Reconnect.")
+    elif isinstance(exc, asyncio.TimeoutError):
+        parts.append(f"Tip: run `{spec.command}` in PowerShell to check if it is waiting for login or confirmation.")
+    return "\n".join(parts)
+
+
+async def _drain_stderr(
+    stream: asyncio.StreamReader | None,
+    lines: deque[str],
+    agent_id: str,
+) -> None:
+    """Collect recent stderr lines from the ACP child process for diagnostics."""
+    if stream is None:
+        return
+    try:
+        while True:
+            raw = await stream.readline()
+            if not raw:
+                break
+            text = raw.decode("utf-8", errors="replace").rstrip()
+            if text:
+                lines.append(text)
+                logger.warning("[%s stderr] %s", agent_id, text)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+
+
 class AcpBridge(QObject):
     """Thread-safe Qt bridge managing a live ACP subprocess and session."""
 
@@ -532,21 +652,28 @@ class AcpBridge(QObject):
         client = _PocketAcpClient(self)
         env = dict(os.environ)
         env.update(spec.env)
+        stderr_lines: deque[str] = deque(maxlen=15)
+        stderr_task: asyncio.Task[None] | None = None
         try:
-            async with acp.spawn_agent_process(
+            async with _spawn_agent_process(
                 client,
                 exe,
                 *spec.args,
                 cwd=cwd,
                 env=env,
-                transport_kwargs={"limit": 16 * 1024 * 1024},
             ) as (conn, proc):
                 self._conn = conn
-                init = await conn.initialize(
-                    protocol_version=acp.PROTOCOL_VERSION,
-                    client_info=Implementation(name="pocket-agent", version=__version__),
-                )
-                sess = await conn.new_session(cwd=cwd)
+                stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, stderr_lines, spec.id))
+
+                async def _handshake() -> tuple[Any, Any]:
+                    init_resp = await conn.initialize(
+                        protocol_version=acp.PROTOCOL_VERSION,
+                        client_info=Implementation(name="pocket-agent", version=__version__),
+                    )
+                    sess_resp = await conn.new_session(cwd=cwd)
+                    return init_resp, sess_resp
+
+                init, sess = await asyncio.wait_for(_handshake(), timeout=_CONNECT_TIMEOUT_SECONDS)
                 self._session_id = sess.session_id
 
                 agent_info = getattr(init, "agent_info", None)
@@ -581,17 +708,45 @@ class AcpBridge(QObject):
                 )
                 self.config_options_updated.emit(config_opts)
 
-                await stop_event.wait()
+                stop_task = asyncio.create_task(stop_event.wait())
+                proc_task = asyncio.create_task(proc.wait())
+                try:
+                    done, pending = await asyncio.wait(
+                        {stop_task, proc_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for p in pending:
+                        p.cancel()
+                        with contextlib.suppress(BaseException):
+                            await p
+                    if proc_task in done and not stop_event.is_set():
+                        rc = proc_task.result()
+                        err_msg = _format_connection_error(
+                            spec,
+                            f"{spec.name} exited unexpectedly (code {rc}).",
+                            stderr_lines,
+                        )
+                        self.disconnected.emit(err_msg)
+                        return
+                finally:
+                    for t in (stop_task, proc_task):
+                        if not t.done():
+                            t.cancel()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            msg = str(exc).strip() or exc.__class__.__name__
+            msg = _format_connection_error(spec, exc, stderr_lines)
+            logger.warning("ACP connection failed for %s: %s", spec.id, msg)
             if not ready_fut.done():
                 ready_fut.set_exception(RuntimeError(msg))
             else:
                 self.disconnected.emit(msg)
             return
         finally:
+            if stderr_task is not None and not stderr_task.done():
+                stderr_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await stderr_task
             self._conn = None
             self._session_id = None
 

@@ -5,12 +5,27 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Iterable
 
 from pocket_agent.engine.orbs import VOICE_ORBS
 from pocket_agent.engine.spritesheet import generate_pocketbot_sheet
 
-BUILTIN_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+
+def _resolve_builtin_assets_dir() -> Path:
+    """Resolve the bundled assets directory in source, wheel, or PyInstaller builds."""
+    local = Path(__file__).resolve().parent.parent / "assets"
+    if local.exists():
+        return local
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bundled = Path(meipass) / "pocket_agent" / "assets"
+        if bundled.exists():
+            return bundled
+    return local
+
+
+BUILTIN_ASSETS_DIR = _resolve_builtin_assets_dir()
 BUILTIN_POCKETBOT_ID = "pocketbot"
 
 FEATURED_EXTERNAL_IDS = [

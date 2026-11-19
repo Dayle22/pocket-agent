@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (defaults to v<package version>)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Resolve version and validate tag
+        id: meta
+        shell: pwsh
+        run: |
+          $pkgVer = (python -c "import pocket_agent; print(pocket_agent.__version__)").Trim()
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            if ("${{ inputs.tag }}" -ne "") {
+              $tag = "${{ inputs.tag }}"
+            } else {
+              $tag = "v$pkgVer"
+            }
+          }
+          if ($tag -ne "v$pkgVer") {
+            throw "Tag '$tag' does not match pocket_agent.__version__ '$pkgVer'"
+          }
+          "version=$pkgVer" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Run pytest
+        run: python -m pytest -v
+
+      - name: Build console-free Windows executable and zip
+        shell: pwsh
+        run: .\packaging\build_windows.ps1 -SkipTests
+
+      - name: Smoke-test PocketAgent.exe startup
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "dist\PocketAgent\PocketAgent.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 4
+          if ($proc.HasExited) {
+            $log = Join-Path $env:USERPROFILE ".pocket-agent\pocket-agent.log"
+            if (Test-Path $log) { Get-Content $log }
+            throw "PocketAgent.exe exited early with code $($proc.ExitCode)"
+          }
+          Stop-Process -Id $proc.Id -Force
+          Write-Host "PocketAgent.exe stayed alive cleanly for 4s."
+
+      - name: Build Python sdist and wheel
+        run: python -m build
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Pocket Agent ${{ steps.meta.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/PocketAgent-${{ steps.meta.outputs.tag }}-win64.zip
+            dist/PocketAgent-${{ steps.meta.outputs.tag }}-win64.zip.sha256
+            dist/*.whl
+            dist/*.tar.gz

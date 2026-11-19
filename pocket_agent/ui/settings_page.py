@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from pocket_agent import __version__
 from pocket_agent.ui.theme import FONT_UI, get_palette, is_blur_enabled, lucide_icon
 from pocket_agent.voice import VOICE_PRESETS
 
@@ -30,6 +31,7 @@ class SettingsPage(QWidget):
     theme_selected = pyqtSignal(str)
     blur_toggled = pyqtSignal(bool)
     always_on_top_toggled = pyqtSignal(bool)
+    startup_toggled = pyqtSignal(bool)
     thoughts_toggled = pyqtSignal(bool)
     workspace_browse_requested = pyqtSignal()
 
@@ -40,6 +42,7 @@ class SettingsPage(QWidget):
         theme_mode: str = "system",
         backdrop_blur: bool = True,
         always_on_top: bool = True,
+        launch_at_startup: bool = False,
         show_thoughts: bool = True,
         workspace: str = "",
         parent: QWidget | None = None,
@@ -55,6 +58,7 @@ class SettingsPage(QWidget):
             theme_mode=theme_mode,
             backdrop_blur=backdrop_blur,
             always_on_top=always_on_top,
+            launch_at_startup=launch_at_startup,
             show_thoughts=show_thoughts,
             workspace=workspace,
         )
@@ -68,6 +72,7 @@ class SettingsPage(QWidget):
         theme_mode: str,
         backdrop_blur: bool,
         always_on_top: bool,
+        launch_at_startup: bool,
         show_thoughts: bool,
         workspace: str,
     ) -> None:
@@ -156,6 +161,11 @@ class SettingsPage(QWidget):
         self._top_cb.setChecked(always_on_top)
         self._top_cb.toggled.connect(self.always_on_top_toggled.emit)
         a_lay.addWidget(self._top_cb)
+
+        self._startup_cb = QCheckBox("Launch at Windows Startup", app_card)
+        self._startup_cb.setChecked(launch_at_startup)
+        self._startup_cb.toggled.connect(self.startup_toggled.emit)
+        a_lay.addWidget(self._startup_cb)
         layout.addWidget(app_card)
 
         # ---- Chat & Workspace Card ----
@@ -183,6 +193,9 @@ class SettingsPage(QWidget):
         layout.addWidget(chat_card)
 
         layout.addStretch(1)
+        self._version_lbl = QLabel(f"Pocket Agent v{__version__}", container)
+        self._version_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._version_lbl)
         self._scroll.setWidget(container)
         root.addWidget(self._scroll)
 
@@ -242,6 +255,11 @@ class SettingsPage(QWidget):
         self._top_cb.setChecked(enabled)
         self._top_cb.blockSignals(False)
 
+    def set_launch_at_startup(self, enabled: bool) -> None:
+        self._startup_cb.blockSignals(True)
+        self._startup_cb.setChecked(enabled)
+        self._startup_cb.blockSignals(False)
+
     def set_show_thoughts(self, enabled: bool) -> None:
         self._thoughts_cb.blockSignals(True)
         self._thoughts_cb.setChecked(enabled)
@@ -266,6 +284,9 @@ class SettingsPage(QWidget):
         self._workspace_val.setStyleSheet(
             f"color: {pal.text_normal}; font-size: 11px; font-family: {FONT_UI}; background: transparent;"
         )
+        self._version_lbl.setStyleSheet(
+            f"color: {pal.text_faint}; font-size: 10px; font-family: {FONT_UI}; background: transparent; padding-top: 4px;"
+        )
 
         card_bg = pal.bg_card_blur if is_blur_enabled() else pal.bg_card
         card_qss = (
@@ -277,7 +298,7 @@ class SettingsPage(QWidget):
         cb_qss = (
             f"QCheckBox {{ color: {pal.text_normal}; font-size: 12px; font-family: {FONT_UI}; spacing: 8px; background: transparent; }}"
         )
-        for cb in (self._voice_enable_cb, self._blur_cb, self._top_cb, self._thoughts_cb):
+        for cb in (self._voice_enable_cb, self._blur_cb, self._top_cb, self._startup_cb, self._thoughts_cb):
             cb.setStyleSheet(cb_qss)
 
         combo_qss = f"""

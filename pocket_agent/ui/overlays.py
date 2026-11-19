@@ -364,6 +364,8 @@ class ErrorBannerWidget(QFrame):
     """Dismissible error or info overlay positioned above the input box."""
 
     closed = pyqtSignal()
+    reconnect_requested = pyqtSignal()
+    setup_guide_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -392,6 +394,26 @@ class ErrorBannerWidget(QFrame):
         self._msg_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         root.addWidget(self._msg_lbl)
 
+        self._actions_row = QWidget(self)
+        self._actions_row.setStyleSheet("background: transparent;")
+        act_lay = QHBoxLayout(self._actions_row)
+        act_lay.setContentsMargins(0, 2, 0, 0)
+        act_lay.setSpacing(8)
+
+        self._reconnect_btn = QPushButton("Reconnect", self._actions_row)
+        self._reconnect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reconnect_btn.clicked.connect(self._on_reconnect_clicked)
+        act_lay.addWidget(self._reconnect_btn)
+
+        self._guide_btn = QPushButton("Setup Guide", self._actions_row)
+        self._guide_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._guide_btn.clicked.connect(self.setup_guide_requested.emit)
+        act_lay.addWidget(self._guide_btn)
+
+        act_lay.addStretch(1)
+        self._actions_row.setVisible(False)
+        root.addWidget(self._actions_row)
+
         self.apply_theme()
 
     def apply_theme(self) -> None:
@@ -406,13 +428,32 @@ class ErrorBannerWidget(QFrame):
         )
         self._msg_lbl.setStyleSheet(f"color: {pal.text_normal}; font-size: 12px; background: transparent;")
         self._close_btn.setIcon(lucide_icon("x", pal.text_muted, 13))
+        self._reconnect_btn.setStyleSheet(
+            f"QPushButton {{ background: {pal.accent}; color: #ffffff; border: none; border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background: {pal.accent_hover}; }}"
+        )
+        self._guide_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {pal.text_normal}; border: 1px solid {pal.border}; border-radius: 6px; padding: 4px 10px; font-size: 11px; }}"
+            f"QPushButton:hover {{ background: {pal.bg_hover}; border-color: {pal.accent}; }}"
+        )
 
-    def show_banner(self, title: str, message: str, variant: str = "error") -> None:
+    def show_banner(
+        self,
+        title: str,
+        message: str,
+        variant: str = "error",
+        show_actions: bool = False,
+    ) -> None:
         self._variant = variant
         self._title_lbl.setText(title)
         self._msg_lbl.setText(message)
+        self._actions_row.setVisible(show_actions)
         self.apply_theme()
         self.setVisible(True)
+
+    def _on_reconnect_clicked(self) -> None:
+        self.setVisible(False)
+        self.reconnect_requested.emit()
 
     def dismiss(self) -> None:
         self.setVisible(False)

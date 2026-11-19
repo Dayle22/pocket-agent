@@ -111,9 +111,12 @@ class PetWindow(QWidget):
     toggle_drawer_requested = pyqtSignal()
     agent_selected = pyqtSignal(str)
     new_session_requested = pyqtSignal()
+    reconnect_requested = pyqtSignal()
+    setup_guide_requested = pyqtSignal()
     settings_requested = pyqtSignal()
     workspace_change_requested = pyqtSignal()
     always_on_top_changed = pyqtSignal(bool)
+    startup_toggled = pyqtSignal(bool)
     theme_selected = pyqtSignal(str)
     blur_toggled = pyqtSignal(bool)
     voice_toggled = pyqtSignal(bool)
@@ -127,12 +130,14 @@ class PetWindow(QWidget):
         config: AppConfig,
         catalog: PetCatalog,
         agents: list[AgentSpec],
+        launch_at_startup: bool = False,
     ) -> None:
         super().__init__(None)
         self.config = config
         self.catalog = catalog
         self.agents = agents
         self.current_agent_id = config.agent_id
+        self._launch_at_startup = launch_at_startup
 
         self._sheets: dict[str, SpriteSheet] = {}
         self._player: SpritePlayer | OrbPlayer | None = None
@@ -309,7 +314,10 @@ class PetWindow(QWidget):
         tray_menu = PocketMenu(parent=self)
         tray_menu.add_item("Show / Hide Chat", self.toggle_drawer_requested.emit, icon="message-square")
         tray_menu.add_item("New Chat", self.new_session_requested.emit, icon="plus")
+        tray_menu.add_item("Reconnect Agent", self.reconnect_requested.emit, icon="refresh-cw")
+        tray_menu.add_item("Connect an AI (Setup Guide)...", self.setup_guide_requested.emit, icon="book-open")
         tray_menu.add_item("Settings...", self.settings_requested.emit, icon="settings")
+        tray_menu.add_check("Launch at Windows Startup", self._launch_at_startup, self.startup_toggled.emit)
         tray_menu.addSeparator()
         tray_menu.add_item("Quit Pocket Agent", self.exit_requested.emit, icon="power")
         old = getattr(self, "_tray_menu", None)
@@ -317,6 +325,12 @@ class PetWindow(QWidget):
         self._tray_menu = tray_menu
         if old is not None:
             old.deleteLater()
+
+    def set_launch_at_startup(self, enabled: bool) -> None:
+        """Update the tray menu's Windows Startup checkmark."""
+        self._launch_at_startup = enabled
+        if hasattr(self, "_tray"):
+            self._build_tray_menu()
 
     def apply_theme(self) -> None:
         """Re-tint theme-dependent chrome (tray menu) after a Dark/Light switch."""
@@ -539,6 +553,9 @@ class PetWindow(QWidget):
                 enabled=available,
                 tooltip=spec.description,
             )
+        agent_menu.addSeparator()
+        agent_menu.add_item("Reconnect Agent", self.reconnect_requested.emit, icon="refresh-cw")
+        agent_menu.add_item("Connect an AI (Setup Guide)...", self.setup_guide_requested.emit, icon="book-open")
 
         pet_menu = menu.add_submenu("Character", "smile")
         pet_group = QActionGroup(pet_menu)

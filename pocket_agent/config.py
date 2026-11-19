@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,8 @@ from typing import Any
 
 CONFIG_DIR = Path.home() / ".pocket-agent"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+_STARTUP_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_STARTUP_VALUE_NAME = "PocketAgent"
 
 
 def _default_pets_dirs() -> list[str]:
@@ -22,7 +26,65 @@ def _default_pets_dirs() -> list[str]:
 
 def _default_workspace() -> str:
     """Return a clean default working directory for ACP sessions."""
-    return str(Path.cwd())
+    cwd = Path.cwd()
+    if getattr(sys, "frozen", False):
+        return str(Path.home())
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+        if cwd.resolve() == exe_dir or cwd.name.lower() == "system32":
+            return str(Path.home())
+    except OSError:
+        pass
+    return str(cwd)
+
+
+def startup_command() -> str:
+    """Return the Windows Run command used to launch Pocket Agent without a console."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    exe = Path(sys.executable)
+    pythonw = exe.with_name("pythonw.exe")
+    runner = pythonw if pythonw.is_file() else exe
+    return f'"{runner}" -m pocket_agent'
+
+
+def get_launch_at_startup() -> bool:
+    """Return True if Pocket Agent is registered to launch at Windows sign-in."""
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STARTUP_RUN_KEY, 0, winreg.KEY_READ) as key:
+            val, _ = winreg.QueryValueEx(key, _STARTUP_VALUE_NAME)
+            return bool(str(val).strip())
+    except OSError:
+        return False
+
+
+def set_launch_at_startup(enabled: bool) -> bool:
+    """Enable or disable launching Pocket Agent at Windows sign-in via HKCU Run."""
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            _STARTUP_RUN_KEY,
+            0,
+            winreg.KEY_SET_VALUE,
+        ) as key:
+            if enabled:
+                winreg.SetValueEx(key, _STARTUP_VALUE_NAME, 0, winreg.REG_SZ, startup_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, _STARTUP_VALUE_NAME)
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError:
+        return False
 
 
 @dataclass
