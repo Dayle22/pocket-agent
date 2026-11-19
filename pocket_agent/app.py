@@ -10,8 +10,8 @@ import os
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QAbstractNativeEventFilter, QByteArray, QObject, QTimer
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import QAbstractNativeEventFilter, QByteArray, QObject, QTimer, QUrl
+from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QFileDialog
 
@@ -29,6 +29,14 @@ from pocket_agent.ui.drawer import ChatDrawer
 from pocket_agent.ui.pet_window import PetWindow
 from pocket_agent.ui.setup_guide import AgentSetupDialog
 from pocket_agent.ui.theme import set_active_theme
+from pocket_agent.updater import (
+    RELEASES_PAGE_URL,
+    ReleaseInfo,
+    UpdateCheckResult,
+    UpdateManager,
+    is_frozen,
+    spawn_apply_update_script,
+)
 from pocket_agent.voice import VoiceEngine
 
 SINGLE_INSTANCE_SERVER_NAME = "pocket-agent-single-instance"
@@ -113,6 +121,8 @@ class PocketAgentApp(QObject):
         self.registry = AgentRegistry(self.config.custom_agents)
         self.catalog = PetCatalog(self.config.pets_dirs)
         self.bridge = AcpBridge(self)
+        self.updater = UpdateManager(self)
+        self._latest_release: ReleaseInfo | None = None
 
         # Pick saved agent if available, else first available preset
         current_spec = self.registry.get(self.config.agent_id)
@@ -151,6 +161,7 @@ class PocketAgentApp(QObject):
             backdrop_blur=self.config.backdrop_blur,
             voice_enabled=self.config.voice_enabled,
             voice_name=self.config.voice_name,
+            check_updates_on_startup=self.config.check_updates_on_startup,
             width=self.config.drawer_width,
             height=self.config.drawer_height,
         )
@@ -165,6 +176,8 @@ class PocketAgentApp(QObject):
         self.pet.say("Click me or press Ctrl+Shift+Space to chat!", 3200)
 
         self._connect_current_agent()
+        if self.config.check_updates_on_startup:
+            QTimer.singleShot(1500, lambda: self.updater.check_for_updates_async(silent=True))
 
     def _wire_signals(self) -> None:
         # Pet interactions
@@ -176,6 +189,7 @@ class PocketAgentApp(QObject):
         self.pet.reconnect_requested.connect(self._reconnect_agent)
         self.pet.setup_guide_requested.connect(self._open_setup_guide)
         self.pet.settings_requested.connect(self._open_settings)
+        self.pet.check_updates_requested.connect(self._check_updates_manual)
         self.pet.workspace_change_requested.connect(self._prompt_workspace)
         self.pet.always_on_top_changed.connect(self.drawer.set_always_on_top)
         self.pet.startup_toggled.connect(self._set_launch_at_startup)
@@ -209,6 +223,17 @@ class PocketAgentApp(QObject):
         self.drawer.voice_selected.connect(self._set_voice_name)
         self.drawer.test_voice_requested.connect(self.voice.speak_sample)
         self.drawer.stop_speaking_requested.connect(self.voice.stop)
+        self.drawer.check_updates_requested.connect(self._check_updates_manual)
+        self.drawer.auto_update_toggled.connect(self._set_check_updates_on_startup)
+        self.drawer.update_action_requested.connect(self._on_update_action_requested)
+        self.drawer.release_notes_requested.connect(self._on_release_notes_requested)
+
+        # Updater -> Drawer
+        self.updater.check_started.connect(self._on_update_check_started)
+        self.updater.check_finished.connect(self._on_update_check_finished)
+        self.updater.download_progress.connect(self._on_update_download_progress)
+        self.updater.update_ready.connect(self._on_update_ready)
+        self.updater.update_failed.connect(self._on_update_failed)
 
         # ACP Bridge -> Pet + Drawer
         self.bridge.connecting.connect(self._on_connecting)
@@ -373,6 +398,94 @@ class PocketAgentApp(QObject):
         actual = get_launch_at_startup() if os.name == "nt" else enabled
         self.pet.set_launch_at_startup(actual)
         self.drawer.set_launch_at_startup(actual)
+
+    def _set_check_updates_on_startup(self, enabled: bool) -> None:
+        self.config.check_updates_on_startup = enabled
+        self.config.save()
+
+    def _check_updates_manual(self) -> None:
+        self.updater.check_for_updates_async(silent=False)
+
+    def _on_update_check_started(self) -> None:
+        self.drawer.set_update_status("Checking for updates...", busy=True)
+
+    def _on_update_check_finished(self, result: UpdateCheckResult) -> None:
+        if result.error:
+            self.drawer.set_update_status(f"Check failed: {result.error}", busy=False)
+            if not result.silent:
+                self.drawer.show_error_banner("Update Check Failed", result.error)
+            return
+
+        if result.update_available and result.release is not None:
+            self._latest_release = result.release
+            frozen = is_frozen()
+            self.drawer.set_update_status(
+                f"Update available: v{result.release.version}",
+                busy=False,
+                update_available=True,
+                is_frozen=frozen,
+            )
+            self.drawer.show_update_banner(result.release.version, frozen=frozen)
+            return
+
+        self._latest_release = None
+        self.drawer.set_update_status("Up to date", busy=False, update_available=False)
+        if not result.silent and result.latest_version:
+            self.drawer.show_info_banner(
+                "Up to Date",
+                f"Pocket Agent v{result.current_version} is the latest version.",
+            )
+
+    def _on_update_action_requested(self) -> None:
+        if self._latest_release is None:
+            return
+        if is_frozen():
+            self.drawer.set_update_status(
+                "Downloading update...",
+                busy=True,
+                update_available=True,
+                is_frozen=True,
+            )
+            self.updater.download_update_async(self._latest_release)
+        else:
+            QDesktopServices.openUrl(QUrl(self._latest_release.html_url or RELEASES_PAGE_URL))
+
+    def _on_release_notes_requested(self) -> None:
+        url = self._latest_release.html_url if self._latest_release else RELEASES_PAGE_URL
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _on_update_download_progress(self, downloaded: int, total: int) -> None:
+        if total > 0:
+            pct = min(100, int(downloaded * 100 / total))
+            msg = f"Downloading update... {pct}%"
+        else:
+            mb = downloaded / (1024 * 1024)
+            msg = f"Downloading update... {mb:.1f} MB"
+        self.drawer.set_update_status(msg, busy=True, update_available=True, is_frozen=True)
+
+    def _on_update_ready(self, extract_dir: Path) -> None:
+        self.drawer.set_update_status(
+            "Applying update and restarting...",
+            busy=True,
+            update_available=True,
+            is_frozen=True,
+        )
+        try:
+            spawn_apply_update_script(extract_dir)
+        except Exception as exc:
+            self._on_update_failed(str(exc))
+            return
+        self.quit()
+
+    def _on_update_failed(self, error: str) -> None:
+        frozen = is_frozen()
+        self.drawer.set_update_status(
+            f"Update failed: {error}",
+            busy=False,
+            update_available=self._latest_release is not None,
+            is_frozen=frozen,
+        )
+        self.drawer.show_error_banner("Update Failed", error)
 
     def show_drawer(self) -> None:
         """Ensure the chat drawer is visible and focused."""

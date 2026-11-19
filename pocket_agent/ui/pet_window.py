@@ -114,6 +114,7 @@ class PetWindow(QWidget):
     reconnect_requested = pyqtSignal()
     setup_guide_requested = pyqtSignal()
     settings_requested = pyqtSignal()
+    check_updates_requested = pyqtSignal()
     workspace_change_requested = pyqtSignal()
     always_on_top_changed = pyqtSignal(bool)
     startup_toggled = pyqtSignal(bool)
@@ -316,6 +317,7 @@ class PetWindow(QWidget):
         tray_menu.add_item("New Chat", self.new_session_requested.emit, icon="plus")
         tray_menu.add_item("Reconnect Agent", self.reconnect_requested.emit, icon="refresh-cw")
         tray_menu.add_item("Connect an AI (Setup Guide)...", self.setup_guide_requested.emit, icon="book-open")
+        tray_menu.add_item("Check for Updates...", self.check_updates_requested.emit, icon="refresh-cw")
         tray_menu.add_item("Settings...", self.settings_requested.emit, icon="settings")
         tray_menu.add_check("Launch at Windows Startup", self._launch_at_startup, self.startup_toggled.emit)
         tray_menu.addSeparator()
@@ -619,6 +621,7 @@ class PetWindow(QWidget):
         theme_menu.add_check("Translucent Blur (Acrylic)", self.config.backdrop_blur, self.blur_toggled.emit)
         theme_menu.add_check("Always on Top", self.config.always_on_top, self._toggle_always_on_top)
 
+        menu.add_item("Check for Updates...", self.check_updates_requested.emit, icon="refresh-cw")
         menu.add_item("Settings...", self.settings_requested.emit, icon="settings")
 
         menu.addSeparator()

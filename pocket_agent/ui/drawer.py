@@ -387,6 +387,10 @@ class ChatDrawer(QWidget):
     voice_selected = pyqtSignal(str)
     test_voice_requested = pyqtSignal()
     stop_speaking_requested = pyqtSignal()
+    check_updates_requested = pyqtSignal()
+    auto_update_toggled = pyqtSignal(bool)
+    update_action_requested = pyqtSignal()
+    release_notes_requested = pyqtSignal()
     opened = pyqtSignal()
     closed = pyqtSignal()
 
@@ -401,6 +405,7 @@ class ChatDrawer(QWidget):
         backdrop_blur: bool = True,
         voice_enabled: bool = True,
         voice_name: str = "en-ZA-LeahNeural",
+        check_updates_on_startup: bool = True,
         width: int = 440,
         height: int = 560,
     ) -> None:
@@ -411,6 +416,7 @@ class ChatDrawer(QWidget):
         self._backdrop_blur = backdrop_blur
         self._voice_enabled = voice_enabled
         self._voice_name = voice_name
+        self._check_updates_on_startup = check_updates_on_startup
         set_active_theme(theme_mode, backdrop_blur)
 
         self._turns: list[ChatTurn] = []
@@ -649,6 +655,8 @@ class ChatDrawer(QWidget):
         self._error_banner = ErrorBannerWidget(input_outer)
         self._error_banner.reconnect_requested.connect(self.reconnect_requested.emit)
         self._error_banner.setup_guide_requested.connect(self.setup_guide_requested.emit)
+        self._error_banner.update_action_requested.connect(self.update_action_requested.emit)
+        self._error_banner.release_notes_requested.connect(self.release_notes_requested.emit)
         iol.addWidget(self._error_banner)
 
         self._perm_dialog = PermissionDialogWidget(input_outer)
@@ -711,6 +719,7 @@ class ChatDrawer(QWidget):
             launch_at_startup=self._launch_at_startup,
             show_thoughts=self._show_thoughts,
             workspace=workspace,
+            check_updates_on_startup=self._check_updates_on_startup,
             parent=self._pages,
         )
         self._settings_page.back_requested.connect(self.close_settings)
@@ -724,6 +733,9 @@ class ChatDrawer(QWidget):
         self._settings_page.startup_toggled.connect(self.startup_toggled.emit)
         self._settings_page.thoughts_toggled.connect(self._on_toggle_thoughts)
         self._settings_page.workspace_browse_requested.connect(self._pick_workspace)
+        self._settings_page.auto_update_toggled.connect(self.auto_update_toggled.emit)
+        self._settings_page.check_updates_requested.connect(self.check_updates_requested.emit)
+        self._settings_page.apply_update_requested.connect(self.update_action_requested.emit)
         self._pages.addWidget(self._settings_page)
 
         self._size_grip = QSizeGrip(self)
@@ -956,6 +968,44 @@ class ChatDrawer(QWidget):
         self._turns.append(turn)
         self._append_turn_widget(turn)
         self._error_banner.show_banner(title, text, variant="error", show_actions=True)
+
+    def show_update_banner(self, version: str, *, frozen: bool) -> None:
+        """Display an info banner notifying the user of an available release."""
+        if frozen:
+            msg = f"Pocket Agent v{version} is ready to download and install."
+            primary_label = "Update & Restart"
+        else:
+            msg = f"Pocket Agent v{version} is out. Running from source: run `git pull` to update."
+            primary_label = "Open Release"
+        self._error_banner.show_update_banner(
+            f"Update Available: v{version}",
+            msg,
+            primary_label=primary_label,
+        )
+
+    def show_info_banner(self, title: str, message: str) -> None:
+        """Display a dismissible info banner above the input box."""
+        self._error_banner.show_banner(title, message, variant="info")
+
+    def show_error_banner(self, title: str, message: str) -> None:
+        """Display a dismissible error banner above the input box."""
+        self._error_banner.show_banner(title, message, variant="error")
+
+    def set_update_status(
+        self,
+        text: str,
+        *,
+        busy: bool = False,
+        update_available: bool = False,
+        is_frozen: bool = False,
+    ) -> None:
+        """Forward update status text and state to the Settings page."""
+        self._settings_page.set_update_status(
+            text,
+            busy=busy,
+            update_available=update_available,
+            is_frozen=is_frozen,
+        )
 
     def append_user_message(self, text: str) -> None:
         user_turn = ChatTurn(role="user", text=text)
@@ -1343,6 +1393,7 @@ class ChatDrawer(QWidget):
         theme_menu.add_check("Translucent Blur (Acrylic)", self._backdrop_blur, self._emit_blur_toggle)
         theme_menu.add_check("Always on Top", self._always_on_top, self._on_settings_always_on_top)
 
+        menu.add_item("Check for Updates...", self.check_updates_requested.emit, icon="refresh-cw")
         menu.add_item("Settings...", self.open_settings, icon="settings")
 
         hint = menu.sizeHint()

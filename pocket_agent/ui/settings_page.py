@@ -34,6 +34,9 @@ class SettingsPage(QWidget):
     startup_toggled = pyqtSignal(bool)
     thoughts_toggled = pyqtSignal(bool)
     workspace_browse_requested = pyqtSignal()
+    auto_update_toggled = pyqtSignal(bool)
+    check_updates_requested = pyqtSignal()
+    apply_update_requested = pyqtSignal()
 
     def __init__(
         self,
@@ -45,6 +48,7 @@ class SettingsPage(QWidget):
         launch_at_startup: bool = False,
         show_thoughts: bool = True,
         workspace: str = "",
+        check_updates_on_startup: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -61,6 +65,7 @@ class SettingsPage(QWidget):
             launch_at_startup=launch_at_startup,
             show_thoughts=show_thoughts,
             workspace=workspace,
+            check_updates_on_startup=check_updates_on_startup,
         )
         self.apply_theme()
 
@@ -75,6 +80,7 @@ class SettingsPage(QWidget):
         launch_at_startup: bool,
         show_thoughts: bool,
         workspace: str,
+        check_updates_on_startup: bool,
     ) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -192,6 +198,34 @@ class SettingsPage(QWidget):
         c_lay.addLayout(ws_row)
         layout.addWidget(chat_card)
 
+        # ---- Updates Card ----
+        updates_card, u_lay = self._make_card("Updates", container)
+        self._auto_update_cb = QCheckBox("Check for updates automatically", updates_card)
+        self._auto_update_cb.setChecked(check_updates_on_startup)
+        self._auto_update_cb.toggled.connect(self.auto_update_toggled.emit)
+        u_lay.addWidget(self._auto_update_cb)
+
+        self._update_status_lbl = QLabel("Up to date", updates_card)
+        self._update_status_lbl.setWordWrap(True)
+        self._field_labels.append(self._update_status_lbl)
+        u_lay.addWidget(self._update_status_lbl)
+
+        upd_row = QHBoxLayout()
+        upd_row.setSpacing(8)
+        self._check_updates_btn = QPushButton("Check for Updates", updates_card)
+        self._check_updates_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._check_updates_btn.clicked.connect(self.check_updates_requested.emit)
+        upd_row.addWidget(self._check_updates_btn)
+
+        self._apply_update_btn = QPushButton("Update & Restart", updates_card)
+        self._apply_update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._apply_update_btn.clicked.connect(self.apply_update_requested.emit)
+        self._apply_update_btn.setVisible(False)
+        upd_row.addWidget(self._apply_update_btn)
+        upd_row.addStretch(1)
+        u_lay.addLayout(upd_row)
+        layout.addWidget(updates_card)
+
         layout.addStretch(1)
         self._version_lbl = QLabel(f"Pocket Agent v{__version__}", container)
         self._version_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -268,6 +302,29 @@ class SettingsPage(QWidget):
     def set_workspace(self, folder: str) -> None:
         self._workspace_val.setText(folder or ".")
 
+    def set_check_updates_on_startup(self, enabled: bool) -> None:
+        self._auto_update_cb.blockSignals(True)
+        self._auto_update_cb.setChecked(enabled)
+        self._auto_update_cb.blockSignals(False)
+
+    def set_update_status(
+        self,
+        text: str,
+        *,
+        busy: bool = False,
+        update_available: bool = False,
+        is_frozen: bool = False,
+    ) -> None:
+        """Update the status label and action buttons in the Updates card."""
+        self._update_status_lbl.setText(text)
+        self._check_updates_btn.setEnabled(not busy)
+        self._apply_update_btn.setEnabled(not busy)
+        if update_available:
+            self._apply_update_btn.setText("Update & Restart" if is_frozen else "Open Release Page")
+            self._apply_update_btn.setVisible(True)
+        elif not busy:
+            self._apply_update_btn.setVisible(False)
+
     def apply_theme(self) -> None:
         pal = get_palette()
         self._title_lbl.setStyleSheet(
@@ -298,7 +355,14 @@ class SettingsPage(QWidget):
         cb_qss = (
             f"QCheckBox {{ color: {pal.text_normal}; font-size: 12px; font-family: {FONT_UI}; spacing: 8px; background: transparent; }}"
         )
-        for cb in (self._voice_enable_cb, self._blur_cb, self._top_cb, self._startup_cb, self._thoughts_cb):
+        for cb in (
+            self._voice_enable_cb,
+            self._blur_cb,
+            self._top_cb,
+            self._startup_cb,
+            self._thoughts_cb,
+            self._auto_update_cb,
+        ):
             cb.setStyleSheet(cb_qss)
 
         combo_qss = f"""
@@ -338,9 +402,17 @@ class SettingsPage(QWidget):
                 border-color: {pal.accent};
             }}
         """
-        for btn in (self._back_btn, self._test_voice_btn, self._stop_voice_btn, self._browse_ws_btn):
+        for btn in (
+            self._back_btn,
+            self._test_voice_btn,
+            self._stop_voice_btn,
+            self._browse_ws_btn,
+            self._check_updates_btn,
+            self._apply_update_btn,
+        ):
             btn.setStyleSheet(btn_qss)
         self._test_voice_btn.setIcon(lucide_icon("volume-2", pal.text_normal, 13))
+        self._check_updates_btn.setIcon(lucide_icon("refresh-cw", pal.text_normal, 13))
 
         self._scroll.setStyleSheet(
             f"""

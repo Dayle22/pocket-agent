@@ -117,6 +117,7 @@ class AppConfig:
     pet_y: int | None = None
     voice_enabled: bool = True
     voice_name: str = "en-ZA-LeahNeural"
+    check_updates_on_startup: bool = True
     custom_agents: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
