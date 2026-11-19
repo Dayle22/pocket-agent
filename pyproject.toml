@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pocket-agent"
+version = "0.1.0"
+description = "Floating Windows AI companion powered by Agent Client Protocol (ACP) and animated sprites"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.4.0",
+    "Pillow>=9.0.0",
+    "agent-client-protocol>=1.0.0",
+    "edge-tts>=6.1.0",
+]
+
+[project.scripts]
+pocket-agent = "pocket_agent.app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pocket_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
