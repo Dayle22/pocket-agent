@@ -743,6 +743,7 @@ class OrbGlRenderer:
         self._gl: Any = None
         self._vbo: QOpenGLBuffer | None = None
         self._programs: dict[str, QOpenGLShaderProgram] = {}
+        self._custom_sources: dict[str, str] = {}
         self._compile_errors: dict[str, str] = {}
         self._fbos: dict[int, QOpenGLFramebufferObject] = {}
         self._bg_tex_id: int | None = None
@@ -807,10 +808,33 @@ class OrbGlRenderer:
             self._init_failed = True
             return False
 
+    def register_shader(self, orb_id: str, frag_src: str) -> None:
+        """Register or replace a custom GLSL fragment shader source for `orb_id`."""
+        if self._custom_sources.get(orb_id) == frag_src and orb_id in self._programs:
+            return
+        self._custom_sources[orb_id] = frag_src
+        self._programs.pop(orb_id, None)
+        self._compile_errors.pop(orb_id, None)
+
+    def unregister_shader(self, orb_id: str) -> None:
+        """Remove a dynamically registered shader program and cached compile state."""
+        self._custom_sources.pop(orb_id, None)
+        self._programs.pop(orb_id, None)
+        self._compile_errors.pop(orb_id, None)
+
+    def compile_shader(self, orb_id: str, frag_src: str | None = None) -> str:
+        """Compile and link `orb_id`, returning an empty string on success or the GLSL error log."""
+        if frag_src is not None:
+            self.register_shader(orb_id, frag_src)
+        if not self._ensure_gl():
+            return "OpenGL context unavailable"
+        prog = self._get_program(orb_id)
+        return "" if prog is not None else self._compile_errors.get(orb_id, "Unknown shader error")
+
     def _get_program(self, orb_id: str) -> QOpenGLShaderProgram | None:
         if orb_id in self._programs:
             return self._programs[orb_id]
-        frag_src = _SHADER_SOURCES.get(orb_id)
+        frag_src = self._custom_sources.get(orb_id) or _SHADER_SOURCES.get(orb_id)
         if frag_src is None or not self._ensure_gl():
             return None
         if not self._ctx.makeCurrent(self._surface):  # type: ignore[union-attr]

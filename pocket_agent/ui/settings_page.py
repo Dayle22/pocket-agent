@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -16,6 +17,7 @@ from PyQt6.QtWidgets import (
 )
 
 from pocket_agent import __version__
+from pocket_agent.engine.orbkit import ORBKIT_PLAYGROUND_URL
 from pocket_agent.ui.theme import FONT_UI, get_palette, is_blur_enabled, lucide_icon
 from pocket_agent.voice import VOICE_PRESETS
 
@@ -37,6 +39,7 @@ class SettingsPage(QWidget):
     auto_update_toggled = pyqtSignal(bool)
     check_updates_requested = pyqtSignal()
     apply_update_requested = pyqtSignal()
+    manage_orbs_requested = pyqtSignal()
 
     def __init__(
         self,
@@ -172,6 +175,27 @@ class SettingsPage(QWidget):
         self._startup_cb.setChecked(launch_at_startup)
         self._startup_cb.toggled.connect(self.startup_toggled.emit)
         a_lay.addWidget(self._startup_cb)
+
+        orbkit_lbl = QLabel("Custom Orbs (Orbkit)", app_card)
+        self._field_labels.append(orbkit_lbl)
+        a_lay.addWidget(orbkit_lbl)
+
+        orb_row = QHBoxLayout()
+        orb_row.setSpacing(8)
+        self._manage_orbs_btn = QPushButton("Add / Manage Orbkit Orbs...", app_card)
+        self._manage_orbs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._manage_orbs_btn.clicked.connect(self.manage_orbs_requested.emit)
+        orb_row.addWidget(self._manage_orbs_btn)
+
+        self._open_orbkit_btn = QPushButton("Open Playground", app_card)
+        self._open_orbkit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._open_orbkit_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(ORBKIT_PLAYGROUND_URL))
+        )
+        orb_row.addWidget(self._open_orbkit_btn)
+        orb_row.addStretch(1)
+        a_lay.addLayout(orb_row)
+
         layout.addWidget(app_card)
 
         # ---- Chat & Workspace Card ----
@@ -406,12 +430,16 @@ class SettingsPage(QWidget):
             self._back_btn,
             self._test_voice_btn,
             self._stop_voice_btn,
+            self._manage_orbs_btn,
+            self._open_orbkit_btn,
             self._browse_ws_btn,
             self._check_updates_btn,
             self._apply_update_btn,
         ):
             btn.setStyleSheet(btn_qss)
         self._test_voice_btn.setIcon(lucide_icon("volume-2", pal.text_normal, 13))
+        self._manage_orbs_btn.setIcon(lucide_icon("sparkles", pal.text_normal, 13))
+        self._open_orbkit_btn.setIcon(lucide_icon("globe", pal.text_normal, 13))
         self._check_updates_btn.setIcon(lucide_icon("refresh-cw", pal.text_normal, 13))
 
         self._scroll.setStyleSheet(

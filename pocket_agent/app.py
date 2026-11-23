@@ -25,7 +25,9 @@ from pocket_agent.config import (
 )
 from pocket_agent.engine.catalog import BUILTIN_ASSETS_DIR, PetCatalog
 from pocket_agent.engine.fsm import PetState
+from pocket_agent.engine.orbkit import CUSTOM_ORBS_DIR
 from pocket_agent.ui.drawer import ChatDrawer
+from pocket_agent.ui.orbkit_dialog import OrbkitManagerDialog
 from pocket_agent.ui.pet_window import PetWindow
 from pocket_agent.ui.setup_guide import AgentSetupDialog
 from pocket_agent.ui.theme import set_active_theme
@@ -119,7 +121,7 @@ class PocketAgentApp(QObject):
         self.qt_app = qt_app
         self.config = AppConfig.load()
         self.registry = AgentRegistry(self.config.custom_agents)
-        self.catalog = PetCatalog(self.config.pets_dirs)
+        self.catalog = PetCatalog(self.config.pets_dirs, custom_orbs_dir=CUSTOM_ORBS_DIR)
         self.bridge = AcpBridge(self)
         self.updater = UpdateManager(self)
         self._latest_release: ReleaseInfo | None = None
@@ -189,6 +191,7 @@ class PocketAgentApp(QObject):
         self.pet.reconnect_requested.connect(self._reconnect_agent)
         self.pet.setup_guide_requested.connect(self._open_setup_guide)
         self.pet.settings_requested.connect(self._open_settings)
+        self.pet.manage_orbs_requested.connect(self._open_orbkit_manager)
         self.pet.check_updates_requested.connect(self._check_updates_manual)
         self.pet.workspace_change_requested.connect(self._prompt_workspace)
         self.pet.always_on_top_changed.connect(self.drawer.set_always_on_top)
@@ -227,6 +230,7 @@ class PocketAgentApp(QObject):
         self.drawer.auto_update_toggled.connect(self._set_check_updates_on_startup)
         self.drawer.update_action_requested.connect(self._on_update_action_requested)
         self.drawer.release_notes_requested.connect(self._on_release_notes_requested)
+        self.drawer.manage_orbs_requested.connect(self._open_orbkit_manager)
 
         # Updater -> Drawer
         self.updater.check_started.connect(self._on_update_check_started)
@@ -363,6 +367,20 @@ class PocketAgentApp(QObject):
         if not self.drawer.isVisible():
             self._toggle_drawer()
         self.drawer.open_settings()
+
+    def _open_orbkit_manager(self) -> None:
+        dlg = OrbkitManagerDialog(
+            custom_orbs_dir=CUSTOM_ORBS_DIR,
+            current_pet_id=self.config.pet_id,
+            parent=self.drawer if self.drawer.isVisible() else self.pet,
+        )
+        dlg.orbs_changed.connect(self.pet.reload_catalog)
+        dlg.orb_selected.connect(self._select_pet_orb)
+        dlg.exec()
+
+    def _select_pet_orb(self, orb_id: str) -> None:
+        self.pet.reload_catalog()
+        self.pet._load_pet(orb_id)
 
     def _set_theme_mode(self, mode: str) -> None:
         self.config.theme = mode

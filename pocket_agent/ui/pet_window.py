@@ -114,6 +114,7 @@ class PetWindow(QWidget):
     reconnect_requested = pyqtSignal()
     setup_guide_requested = pyqtSignal()
     settings_requested = pyqtSignal()
+    manage_orbs_requested = pyqtSignal()
     check_updates_requested = pyqtSignal()
     workspace_change_requested = pyqtSignal()
     always_on_top_changed = pyqtSignal(bool)
@@ -270,7 +271,11 @@ class PetWindow(QWidget):
     def _load_pet(self, pet_id: str) -> None:
         info = self.catalog.get(pet_id)
         if info.orb_id is not None:
-            self._player = OrbPlayer(info.orb_id, static_idle=self.config.static_idle)
+            self._player = OrbPlayer(
+                info.orb_id,
+                static_idle=self.config.static_idle,
+                custom_orb=info.custom_orb,
+            )
             self._player.set_orb_state(self._orb_state)
             self._bg_capture_elapsed_ms = 0
             self._capture_orb_background()
@@ -575,13 +580,25 @@ class PetWindow(QWidget):
 
         orb_menu = menu.add_submenu("Voice Orb", "circle-dot")
         orb_group = QActionGroup(orb_menu)
-        for orb in self.catalog.orbs():
+        for orb in [o for o in self.catalog.orbs() if o.custom_orb is None]:
             orb_menu.add_check(
                 orb.display_name.removesuffix(" (Orb)"),
                 orb.id == self.config.pet_id,
                 lambda _c=False, pid=orb.id: self._load_pet(pid),
                 group=orb_group,
             )
+        custom_orbs = self.catalog.custom_orbs()
+        if custom_orbs:
+            orb_menu.addSeparator()
+            for orb in custom_orbs:
+                orb_menu.add_check(
+                    orb.display_name.removesuffix(" (Orbkit)"),
+                    orb.id == self.config.pet_id,
+                    lambda _c=False, pid=orb.id: self._load_pet(pid),
+                    group=orb_group,
+                )
+        orb_menu.addSeparator()
+        orb_menu.add_item("Add / Manage Orbkit Orbs...", self.manage_orbs_requested.emit, icon="plus")
 
         voice_menu = menu.add_submenu("Voice", "volume-2")
         voice_menu.add_check("Read Replies Aloud", self.config.voice_enabled, self.voice_toggled.emit)
@@ -645,6 +662,13 @@ class PetWindow(QWidget):
         self.show()
         self.raise_()
         self.always_on_top_changed.emit(checked)
+
+    def reload_catalog(self) -> None:
+        """Refresh the pet/orb catalog and fall back safely if the active custom orb was deleted."""
+        self.catalog.refresh()
+        available_ids = {p.id for p in self.catalog.all()}
+        if self.config.pet_id not in available_ids:
+            self._load_pet("siri-sheet")
 
     def close_tray(self) -> None:
         self._tray.hide()

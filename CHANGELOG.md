@@ -2,6 +2,13 @@
 
 All notable changes to Pocket Agent will be documented in this file.
 
+## [0.3.0] - 2026-11-23
+
+### Added
+- Orbkit (`zzzzshawn/orbkit`) custom orb importer and manager (`OrbkitManagerDialog`) with live GPU OpenGL preview, state toggles (`Idle`, `Thinking`, `Speaking`), and one-click links to the Orbkit Playground and GitHub repository.
+- Pure-Python parser for Orbkit `.tsx` (`OrbVariant`), shadcn registry `.json`, Playground JSX snippets (`<Shdr... />`), CLI install commands, URLs, and slugs, plus persistent local storage under `~/.pocket-agent/orbs/`.
+- Native Orbkit GLSL runtime in `OrbPlayer` and `OrbGlRenderer` supporting `uP_*` / `uC_*` uniforms, `integrate: true` clocks, critically damped spring transitions, live TTS audio reactivity, and bezel/glass wrapper overlays.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added

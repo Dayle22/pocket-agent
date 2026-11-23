@@ -391,6 +391,7 @@ class ChatDrawer(QWidget):
     auto_update_toggled = pyqtSignal(bool)
     update_action_requested = pyqtSignal()
     release_notes_requested = pyqtSignal()
+    manage_orbs_requested = pyqtSignal()
     opened = pyqtSignal()
     closed = pyqtSignal()
 
@@ -736,6 +737,7 @@ class ChatDrawer(QWidget):
         self._settings_page.auto_update_toggled.connect(self.auto_update_toggled.emit)
         self._settings_page.check_updates_requested.connect(self.check_updates_requested.emit)
         self._settings_page.apply_update_requested.connect(self.update_action_requested.emit)
+        self._settings_page.manage_orbs_requested.connect(self.manage_orbs_requested.emit)
         self._pages.addWidget(self._settings_page)
 
         self._size_grip = QSizeGrip(self)

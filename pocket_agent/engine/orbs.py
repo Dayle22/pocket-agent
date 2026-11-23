@@ -20,12 +20,14 @@ from PyQt6.QtGui import (
     QColor,
     QImage,
     QPainter,
+    QPen,
     QPixmap,
     QRadialGradient,
 )
 
 from pocket_agent.engine.fsm import PetAction, PetState
 from pocket_agent.engine.orb_shaders import OrbGlRenderer
+from pocket_agent.engine.orbkit import CustomOrbDefinition
 from pocket_agent.engine.spritesheet import CELL_HEIGHT, CELL_WIDTH
 
 Rgb = tuple[int, int, int]
@@ -339,6 +341,75 @@ _DUO_CHANNEL_ATTACK = 10.0
 _DUO_CHANNEL_RELEASE = 4.0
 _DUO_FLOW_SCALE = 1.0
 
+# ---------------------------------------------------------------------------
+# Orbkit (`zzzzshawn/orbkit`) Runtime Helpers
+# ---------------------------------------------------------------------------
+
+_ORBKIT_PARAM_EASE = 4.0
+
+
+def _orbkit_spring_step(
+    x: float,
+    v: float,
+    target: float,
+    dt: float,
+    omega: float = _ORBKIT_PARAM_EASE,
+) -> tuple[float, float]:
+    """Implicit critically damped spring step matching `orbkit-core.tsx`."""
+    if dt <= 0.0:
+        return x, v
+    f = 1.0 + 2.0 * dt * omega
+    oo = omega * omega
+    hoo = dt * oo
+    hhoo = dt * hoo
+    det_inv = 1.0 / (f + hhoo)
+    nx = (f * x + dt * v + hhoo * target) * det_inv
+    nv = (v + hoo * (target - x)) * det_inv
+    return nx, nv
+
+
+def _orbkit_target_volumes(state: str, t: float) -> tuple[float, float]:
+    """Synthesized `(input, output)` volume channels matching `orbkit-core.tsx`."""
+    if state == "speaking":
+        return (
+            clamp01(0.65 + math.sin(t * 4.8) * 0.22),
+            clamp01(0.75 + math.sin(t * 3.6) * 0.22),
+        )
+    if state == "thinking":
+        base = 0.38 + 0.07 * math.sin(t * 0.7)
+        wander = 0.05 * math.sin(t * 2.1) * math.sin(t * 0.37 + 1.2)
+        return (
+            clamp01(base + wander),
+            clamp01(0.48 + 0.12 * math.sin(t * 1.05 + 0.6)),
+        )
+    return (0.0, 0.3)
+
+
+def _map_to_orbkit_state(orb_state: str) -> str:
+    """Map Pocket Agent's 7-state orb lifecycle onto Orbkit's 3-state contract."""
+    if orb_state == "speaking":
+        return "speaking"
+    if orb_state in ("thinking", "connecting", "listening", "error"):
+        return "thinking"
+    return "idle"
+
+
+def _orbkit_palette_pair(custom_orb: CustomOrbDefinition) -> tuple[str, str]:
+    """Pick representative gradient colors for contact shadow / fallback rendering."""
+    idle_cols = custom_orb.state_colors.get("idle", {})
+    chosen: list[str] = []
+    for c in custom_orb.colors:
+        hex_col = custom_orb.color_overrides.get(c.key) or idle_cols.get(c.key) or c.default
+        if hex_col:
+            chosen.append(hex_col)
+        if len(chosen) == 2:
+            break
+    if len(chosen) == 0:
+        return ("#82f4ff", "#8e6cff")
+    if len(chosen) == 1:
+        return (chosen[0], chosen[0])
+    return (chosen[0], chosen[1])
+
 
 def _step_spring(x: float, v: float, target: float, omega: float, zeta: float, dt: float) -> tuple[float, float]:
     if dt <= 0.0:
@@ -454,8 +525,29 @@ def _siri_build_palette(from_rgb: Rgb, to_rgb: Rgb, mute: float) -> dict[str, Ve
 class OrbPlayer:
     """Real-time GPU shader VoiceOrb animation engine compatible with SpritePlayer."""
 
-    def __init__(self, orb_id: str, static_idle: bool = False) -> None:
-        self.spec: OrbSpec = ORB_REGISTRY.get(orb_id) or ORB_REGISTRY["siri-sheet"]
+    def __init__(
+        self,
+        orb_id: str,
+        static_idle: bool = False,
+        custom_orb: CustomOrbDefinition | None = None,
+    ) -> None:
+        self.custom_orb: CustomOrbDefinition | None = custom_orb
+        if custom_orb is not None:
+            c_from, c_to = _orbkit_palette_pair(custom_orb)
+            self.spec = OrbSpec(
+                id=custom_orb.id,
+                name=custom_orb.name,
+                tagline=custom_orb.note,
+                color_from=c_from,
+                color_to=c_to,
+                tech="Orbkit (GLSL)",
+            )
+            OrbGlRenderer.instance().register_shader(
+                custom_orb.id,
+                custom_orb.build_fragment_shader(),
+            )
+        else:
+            self.spec = ORB_REGISTRY.get(orb_id) or ORB_REGISTRY["siri-sheet"]
         self.orb_id: str = self.spec.id
         self.static_idle: bool = static_idle
 
@@ -492,6 +584,20 @@ class OrbPlayer:
         self._duo_output: float = 0.12
         self._duo_flow: float = 3.7
         self._duo_spin: float = 0.0
+
+        # Orbkit driver state snapped to initial idle preset
+        self._ok_anim: float = 12.0
+        self._ok_speed: float = 0.55
+        self._ok_speed_vel: float = 0.0
+        self._ok_in: float = 0.0
+        self._ok_out: float = 0.3
+        self._ok_param_cur: dict[str, float] = {}
+        self._ok_param_vel: dict[str, float] = {}
+        self._ok_param_clocks: dict[str, float] = {}
+        self._ok_color_cur: dict[str, Vec3] = {}
+        self._ok_color_vel: dict[str, list[float]] = {}
+        if custom_orb is not None:
+            self._init_orbkit_state(custom_orb)
 
     def set_hover_cursor(self, nx: float, ny: float) -> None:
         """Update normalized cursor coordinates (-1..1) for magnetic hover parallax."""
@@ -589,7 +695,76 @@ class OrbPlayer:
         self._cached_pixmap = None
         return True
 
+    def _init_orbkit_state(self, orb: CustomOrbDefinition) -> None:
+        idle_presets = orb.state_presets.get("idle", {})
+        for p in orb.params:
+            val = orb.param_overrides.get(p.key, idle_presets.get(p.key, p.default))
+            self._ok_param_cur[p.key] = float(val)
+            self._ok_param_vel[p.key] = 0.0
+            if p.integrate:
+                self._ok_param_clocks[p.key] = 1.5
+        idle_colors = orb.state_colors.get("idle", {})
+        for c in orb.colors:
+            hex_val = orb.color_overrides.get(c.key, idle_colors.get(c.key, c.default))
+            self._ok_color_cur[c.key] = _to_unit(hex_to_rgb(hex_val))
+            self._ok_color_vel[c.key] = [0.0, 0.0, 0.0]
+
+    def _step_orbkit_simulator(self, dt: float) -> None:
+        orb = self.custom_orb
+        if orb is None:
+            return
+        ok_state = _map_to_orbkit_state(self.orb_state)
+        tin, tout = _orbkit_target_volumes(ok_state, self.time_s)
+        vol_ovr = orb.state_volumes.get(ok_state)
+        if vol_ovr:
+            if "input" in vol_ovr:
+                tin = clamp01(vol_ovr["input"])
+            if "output" in vol_ovr:
+                tout = clamp01(vol_ovr["output"])
+
+        if self._live_audio_ttl > 0.0 and self.orb_state == "speaking":
+            tout = max(tout * 0.25, clamp01(self.anim_level))
+        elif self.orb_state == "speaking":
+            tout = max(tout, clamp01(self.anim_level * 0.65))
+        if self.orb_state == "listening" or self.hover > 0.01:
+            tin = clamp01(max(tin, self.level * 0.85, self.hover * 0.35))
+
+        k_vol = 1.0 - math.exp(-dt * 12.0)
+        self._ok_in += (tin - self._ok_in) * k_vol
+        self._ok_out += (tout - self._ok_out) * k_vol
+
+        target_speed = 0.1 + (1.0 - (self._ok_out - 1.0) ** 2) * 0.9
+        self._ok_speed, self._ok_speed_vel = _orbkit_spring_step(
+            self._ok_speed, self._ok_speed_vel, target_speed, dt
+        )
+        self._ok_anim += dt * self._ok_speed
+
+        state_preset = orb.state_presets.get(ok_state, {})
+        for p in orb.params:
+            target = orb.param_overrides.get(p.key, state_preset.get(p.key, p.default))
+            cur = self._ok_param_cur.get(p.key, target)
+            vel = self._ok_param_vel.get(p.key, 0.0)
+            nxt, nvel = _orbkit_spring_step(cur, vel, float(target), dt)
+            self._ok_param_cur[p.key] = nxt
+            self._ok_param_vel[p.key] = nvel
+            if p.integrate:
+                clk = self._ok_param_clocks.get(p.key, 1.5) + dt * self._ok_speed * nxt
+                self._ok_param_clocks[p.key] = clk
+
+        state_col = orb.state_colors.get(ok_state, {})
+        for c in orb.colors:
+            hex_val = orb.color_overrides.get(c.key, state_col.get(c.key, c.default))
+            target_rgb = _to_unit(hex_to_rgb(hex_val))
+            cur_rgb = list(self._ok_color_cur.get(c.key, target_rgb))
+            vel_rgb = self._ok_color_vel.setdefault(c.key, [0.0, 0.0, 0.0])
+            for i in range(3):
+                cur_rgb[i], vel_rgb[i] = _orbkit_spring_step(cur_rgb[i], vel_rgb[i], target_rgb[i], dt)
+            self._ok_color_cur[c.key] = (cur_rgb[0], cur_rgb[1], cur_rgb[2])
+
     def _step_simulator(self, dt: float, d_phase: float, weights: dict[str, float]) -> None:
+        if self.custom_orb is not None:
+            self._step_orbkit_simulator(dt)
+            return
         level = clamp01(self.level)
         anim = self.anim_level
 
@@ -625,6 +800,27 @@ class OrbPlayer:
             self._duo_spin += step * row["spin"]
 
     def _build_uniforms(self, px: int) -> dict[str, Any]:
+        if self.custom_orb is not None:
+            uniforms: dict[str, Any] = {
+                "uRes": (float(px), float(px)),
+                "uTime": self.time_s * 0.5,
+                "uAnim": self._ok_anim,
+                "uInput": self._ok_in,
+                "uOutput": self._ok_out,
+            }
+            for p in self.custom_orb.params:
+                val = (
+                    self._ok_param_clocks.get(p.key, 1.5)
+                    if p.integrate
+                    else self._ok_param_cur.get(p.key, p.default)
+                )
+                uniforms[f"uP_{p.key}"] = float(val)
+            for c in self.custom_orb.colors:
+                uniforms[f"uC_{c.key}"] = self._ok_color_cur.get(
+                    c.key, _to_unit(hex_to_rgb(c.default))
+                )
+            return uniforms
+
         w = self.mix.weights
         level = clamp01(self.level)
         anim = self.anim_level
@@ -780,9 +976,85 @@ class OrbPlayer:
         uniforms["uBgOverscan"] = BG_OVERSCAN
         img = OrbGlRenderer.instance().render(self.orb_id, render_px, uniforms, bg_image=active_bg)
         if img is not None and not img.isNull():
+            if self.custom_orb is not None and w["disabled"] > 0.01:
+                painter.setOpacity(max(0.25, 1.0 - 0.5 * w["disabled"]))
             painter.drawImage(target_rect, img, QRectF(img.rect()))
+            if self.custom_orb is not None and self.custom_orb.wrapper != "none":
+                self._draw_orbkit_wrapper(painter, target_rect, self.custom_orb.wrapper)
         else:
             self._draw_fallback(painter, QPointF(cx, cy), draw_half * 0.78, w)
+
+        painter.restore()
+
+    def _draw_orbkit_wrapper(self, painter: QPainter, target_rect: QRectF, wrapper: str) -> None:
+        """Render lightweight vector bezel/glass wrappers matching Orbkit's wrapper presets."""
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx = target_rect.center().x()
+        cy = target_rect.center().y()
+        r = min(target_rect.width(), target_rect.height()) * 0.48
+        fg = QColor(220, 232, 255)
+
+        if wrapper == "ring":
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(qcolor((220, 232, 255), 0.28), 1.2))
+            painter.drawEllipse(QPointF(cx, cy), r, r)
+            painter.setPen(QPen(qcolor((220, 232, 255), 0.14), 1.0))
+            painter.drawEllipse(QPointF(cx, cy), r * 0.94, r * 0.94)
+        elif wrapper == "dotted":
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(qcolor((220, 232, 255), 0.42)))
+            count = 36
+            spin = self.time_s * 0.13
+            for i in range(count):
+                ang = (math.tau * i / count) + spin
+                painter.drawEllipse(
+                    QPointF(cx + math.cos(ang) * r, cy + math.sin(ang) * r),
+                    1.3,
+                    1.3,
+                )
+        elif wrapper == "ticks":
+            for i in range(60):
+                ang = math.tau * i / 60.0
+                major = i % 5 == 0
+                r_in = r * (0.88 if major else 0.93)
+                painter.setPen(QPen(qcolor((220, 232, 255), 0.55 if major else 0.25), 1.4 if major else 0.9))
+                painter.drawLine(
+                    QPointF(cx + math.cos(ang) * r_in, cy + math.sin(ang) * r_in),
+                    QPointF(cx + math.cos(ang) * r, cy + math.sin(ang) * r),
+                )
+        elif wrapper == "reticle":
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(qcolor((220, 232, 255), 0.25), 0.9))
+            painter.drawEllipse(QPointF(cx, cy), r * 0.96, r * 0.96)
+            painter.setPen(QPen(qcolor((220, 232, 255), 0.5), 1.2))
+            left, top = cx - r, cy - r
+            right, bot = cx + r, cy + r
+            arm = r * 0.22
+            for sx, sy, dx, dy in (
+                (left, top, 1, 1),
+                (right, top, -1, 1),
+                (right, bot, -1, -1),
+                (left, bot, 1, -1),
+            ):
+                painter.drawLine(QPointF(sx, sy), QPointF(sx + arm * dx, sy))
+                painter.drawLine(QPointF(sx, sy), QPointF(sx, sy + arm * dy))
+        elif wrapper == "glass":
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(255, 255, 255, 58), 1.3))
+            painter.drawEllipse(QPointF(cx, cy), r, r)
+            hi = QRadialGradient(QPointF(cx - r * 0.34, cy - r * 0.42), r * 0.48)
+            hi.setColorAt(0.0, QColor(255, 255, 255, 82))
+            hi.setColorAt(0.55, QColor(255, 255, 255, 20))
+            hi.setColorAt(1.0, QColor(255, 255, 255, 0))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(hi))
+            painter.drawEllipse(QPointF(cx, cy), r, r)
+        else:
+            # grid / halftone / scanlines: subtle outer hairline frame
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(fg.red(), fg.green(), fg.blue(), 46), 1.0))
+            painter.drawEllipse(QPointF(cx, cy), r, r)
 
         painter.restore()
 

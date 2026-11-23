@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 from typing import Iterable
 
+from pocket_agent.engine.orbkit import CustomOrbDefinition, load_custom_orbs
 from pocket_agent.engine.orbs import VOICE_ORBS
 from pocket_agent.engine.spritesheet import generate_pocketbot_sheet
 
@@ -52,14 +53,20 @@ class PetInfo:
     description: str = ""
     is_builtin: bool = False
     orb_id: str | None = None
+    custom_orb: CustomOrbDefinition | None = None
 
 
 class PetCatalog:
     """Scans built-in and configured external pet directories."""
 
-    def __init__(self, extra_dirs: Iterable[str | Path] = ()) -> None:
+    def __init__(
+        self,
+        extra_dirs: Iterable[str | Path] = (),
+        custom_orbs_dir: str | Path | None = None,
+    ) -> None:
         self._pets: dict[str, PetInfo] = {}
         self.extra_dirs = [Path(d) for d in extra_dirs]
+        self.custom_orbs_dir = Path(custom_orbs_dir) if custom_orbs_dir is not None else None
         self.refresh()
 
     def refresh(self) -> None:
@@ -87,6 +94,20 @@ class PetCatalog:
                 orb_id=spec.id,
             )
 
+        if self.custom_orbs_dir is not None:
+            for orb in load_custom_orbs(self.custom_orbs_dir):
+                if orb.id in self._pets:
+                    continue
+                self._pets[orb.id] = PetInfo(
+                    id=orb.id,
+                    display_name=f"{orb.name} (Orbkit)",
+                    spritesheet_path=pocketbot_sheet,
+                    description=orb.note or "Custom Orbkit shader orb",
+                    is_builtin=False,
+                    orb_id=orb.id,
+                    custom_orb=orb,
+                )
+
         for root in self.extra_dirs:
             if not root.is_dir():
                 continue
@@ -113,8 +134,12 @@ class PetCatalog:
         return list(self._pets.values())
 
     def orbs(self) -> list[PetInfo]:
-        """Return all built-in procedural VoiceOrb companions."""
+        """Return all procedural VoiceOrb and Orbkit companions."""
         return [p for p in self._pets.values() if p.orb_id is not None]
+
+    def custom_orbs(self) -> list[PetInfo]:
+        """Return user-added Orbkit companions."""
+        return [p for p in self._pets.values() if p.custom_orb is not None]
 
     def characters(self) -> list[PetInfo]:
         """Return all sprite-based companions (built-in and external)."""
