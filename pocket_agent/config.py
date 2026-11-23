@@ -12,6 +12,7 @@ from typing import Any
 
 CONFIG_DIR = Path.home() / ".pocket-agent"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+NO_PROJECT_DIR = CONFIG_DIR / "scratch"
 _STARTUP_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _STARTUP_VALUE_NAME = "PocketAgent"
 
@@ -36,6 +37,17 @@ def _default_workspace() -> str:
     except OSError:
         pass
     return str(cwd)
+
+
+def resolve_session_cwd(workspace: str, no_project_dir: Path = NO_PROJECT_DIR) -> str:
+    """Return a valid working directory for ACP, using an isolated scratch folder when no project is active."""
+    cleaned = workspace.strip()
+    if cleaned:
+        candidate = Path(cleaned)
+        if candidate.is_dir():
+            return str(candidate)
+    no_project_dir.mkdir(parents=True, exist_ok=True)
+    return str(no_project_dir)
 
 
 def startup_command() -> str:
@@ -104,7 +116,9 @@ class AppConfig:
 
     agent_id: str = "agy"
     pet_id: str = "pocketbot"
-    workspace: str = field(default_factory=_default_workspace)
+    workspace: str = ""
+    start_without_project: bool = True
+    recent_workspaces: list[str] = field(default_factory=list)
     pets_dirs: list[str] = field(default_factory=_default_pets_dirs)
     always_on_top: bool = True
     static_idle: bool = False
@@ -135,10 +149,34 @@ class AppConfig:
 
         defaults = asdict(cls())
         merged = {k: raw.get(k, v) for k, v in defaults.items()}
+        merged["workspace"] = str(merged.get("workspace") or "").strip()
+        merged["start_without_project"] = bool(merged.get("start_without_project", True))
+        raw_recent = merged.get("recent_workspaces")
+        merged["recent_workspaces"] = (
+            [str(p).strip() for p in raw_recent if isinstance(p, str) and str(p).strip()]
+            if isinstance(raw_recent, list)
+            else []
+        )
         # Ensure discovered local pets dirs remain available if user kept empty list unintentionally
         if not merged.get("pets_dirs"):
             merged["pets_dirs"] = _default_pets_dirs()
-        return cls(**merged)
+        cfg = cls(**merged)
+        if cfg.workspace:
+            cfg.record_recent_workspace(cfg.workspace)
+        return cfg
+
+    def record_recent_workspace(self, folder: str, limit: int = 5) -> None:
+        """Keep the most recently used project folders deduplicated and bounded."""
+        clean = folder.strip()
+        if not clean:
+            return
+        try:
+            if Path(clean).resolve() == NO_PROJECT_DIR.resolve():
+                return
+        except OSError:
+            pass
+        deduped = [clean] + [p for p in self.recent_workspaces if os.path.normcase(p) != os.path.normcase(clean)]
+        self.recent_workspaces = deduped[:limit]
 
     def save(self, path: Path = CONFIG_FILE) -> None:
         """Persist configuration atomically."""

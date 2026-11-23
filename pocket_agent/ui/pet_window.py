@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
+from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
@@ -117,6 +119,9 @@ class PetWindow(QWidget):
     manage_orbs_requested = pyqtSignal()
     check_updates_requested = pyqtSignal()
     workspace_change_requested = pyqtSignal()
+    workspace_selected = pyqtSignal(str)
+    workspace_clear_requested = pyqtSignal()
+    start_without_project_toggled = pyqtSignal(bool)
     always_on_top_changed = pyqtSignal(bool)
     startup_toggled = pyqtSignal(bool)
     theme_selected = pyqtSignal(str)
@@ -133,6 +138,7 @@ class PetWindow(QWidget):
         catalog: PetCatalog,
         agents: list[AgentSpec],
         launch_at_startup: bool = False,
+        active_workspace: str = "",
     ) -> None:
         super().__init__(None)
         self.config = config
@@ -140,6 +146,9 @@ class PetWindow(QWidget):
         self.agents = agents
         self.current_agent_id = config.agent_id
         self._launch_at_startup = launch_at_startup
+        self._active_workspace = active_workspace.strip()
+        self._recent_workspaces: list[str] = [p for p in config.recent_workspaces if Path(p).is_dir()]
+        self._start_without_project = config.start_without_project
 
         self._sheets: dict[str, SpriteSheet] = {}
         self._player: SpritePlayer | OrbPlayer | None = None
@@ -338,6 +347,16 @@ class PetWindow(QWidget):
         self._launch_at_startup = enabled
         if hasattr(self, "_tray"):
             self._build_tray_menu()
+
+    def set_active_workspace(self, workspace: str, recent_workspaces: list[str] | None = None) -> None:
+        """Update the active project path shown in the pet context menu."""
+        self._active_workspace = workspace.strip()
+        if recent_workspaces is not None:
+            self._recent_workspaces = list(recent_workspaces)
+
+    def set_start_without_project(self, enabled: bool) -> None:
+        """Update the start-without-project default checkmark in the pet context menu."""
+        self._start_without_project = enabled
 
     def apply_theme(self) -> None:
         """Re-tint theme-dependent chrome (tray menu) after a Dark/Light switch."""
@@ -544,7 +563,33 @@ class PetWindow(QWidget):
 
         menu.add_item("Show / Hide Chat", self.toggle_drawer_requested.emit, icon="message-square", shortcut="Ctrl+Shift+Space")
         menu.add_item("New Chat", self.new_session_requested.emit, icon="plus")
-        menu.add_item("Change Workspace Folder...", self.workspace_change_requested.emit, icon="folder")
+        project_menu = menu.add_submenu("Project", "folder")
+        project_group = QActionGroup(project_menu)
+        project_menu.add_check(
+            "No Project (General Chat)",
+            not self._active_workspace,
+            lambda _c=False: self.workspace_clear_requested.emit(),
+            group=project_group,
+        )
+        if self._recent_workspaces:
+            project_menu.addSeparator()
+            for folder in self._recent_workspaces:
+                label = Path(folder).name or folder
+                project_menu.add_check(
+                    label,
+                    bool(self._active_workspace) and os.path.normcase(self._active_workspace) == os.path.normcase(folder),
+                    lambda _c=False, f=folder: self.workspace_selected.emit(f),
+                    group=project_group,
+                    tooltip=folder,
+                )
+        project_menu.addSeparator()
+        project_menu.add_item("Choose Project Folder...", self.workspace_change_requested.emit, icon="folder-open")
+        project_menu.addSeparator()
+        project_menu.add_check(
+            "Start without a project by default",
+            self._start_without_project,
+            self.start_without_project_toggled.emit,
+        )
 
         menu.addSeparator()
 

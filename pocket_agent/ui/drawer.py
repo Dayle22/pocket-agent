@@ -375,6 +375,7 @@ class ChatDrawer(QWidget):
     mode_selected = pyqtSignal(str)
     config_option_selected = pyqtSignal(str, str)  # config_id, value
     workspace_selected = pyqtSignal(str)
+    start_without_project_toggled = pyqtSignal(bool)
     new_session_requested = pyqtSignal()
     reconnect_requested = pyqtSignal()
     setup_guide_requested = pyqtSignal()
@@ -407,6 +408,8 @@ class ChatDrawer(QWidget):
         voice_enabled: bool = True,
         voice_name: str = "en-ZA-LeahNeural",
         check_updates_on_startup: bool = True,
+        start_without_project: bool = True,
+        recent_workspaces: list[str] | None = None,
         width: int = 440,
         height: int = 560,
     ) -> None:
@@ -418,6 +421,8 @@ class ChatDrawer(QWidget):
         self._voice_enabled = voice_enabled
         self._voice_name = voice_name
         self._check_updates_on_startup = check_updates_on_startup
+        self._start_without_project = start_without_project
+        self._recent_workspaces: list[str] = list(recent_workspaces or [])
         set_active_theme(theme_mode, backdrop_blur)
 
         self._turns: list[ChatTurn] = []
@@ -563,7 +568,7 @@ class ChatDrawer(QWidget):
         self._cwd_btn = QPushButton(self._header_bar)
         self._cwd_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._cwd_btn.setFixedHeight(22)
-        self._cwd_btn.clicked.connect(self._pick_workspace)
+        self._cwd_btn.clicked.connect(self._show_project_menu)
         self.set_workspace(workspace)
         hl.addWidget(self._cwd_btn)
 
@@ -720,6 +725,7 @@ class ChatDrawer(QWidget):
             launch_at_startup=self._launch_at_startup,
             show_thoughts=self._show_thoughts,
             workspace=workspace,
+            start_without_project=self._start_without_project,
             check_updates_on_startup=self._check_updates_on_startup,
             parent=self._pages,
         )
@@ -733,7 +739,9 @@ class ChatDrawer(QWidget):
         self._settings_page.always_on_top_toggled.connect(self._on_settings_always_on_top)
         self._settings_page.startup_toggled.connect(self.startup_toggled.emit)
         self._settings_page.thoughts_toggled.connect(self._on_toggle_thoughts)
+        self._settings_page.start_without_project_toggled.connect(self._on_start_without_project_toggled)
         self._settings_page.workspace_browse_requested.connect(self._pick_workspace)
+        self._settings_page.workspace_clear_requested.connect(self._clear_workspace)
         self._settings_page.auto_update_toggled.connect(self.auto_update_toggled.emit)
         self._settings_page.check_updates_requested.connect(self.check_updates_requested.emit)
         self._settings_page.apply_update_requested.connect(self.update_action_requested.emit)
@@ -756,7 +764,7 @@ class ChatDrawer(QWidget):
             f"#FloatingHeader {{ background: transparent; border-bottom: 1px solid {pal.border_subtle}; }}"
         )
         self._agent_pill.apply_theme()
-        self._cwd_btn.setIcon(lucide_icon("folder", pal.text_faint, 12))
+        self._cwd_btn.setIcon(lucide_icon("folder" if self._workspace else "message-square", pal.text_faint, 12))
         self._cwd_btn.setStyleSheet(
             f"""
             QPushButton {{
@@ -844,14 +852,30 @@ class ChatDrawer(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def set_workspace(self, workspace: str) -> None:
-        self._workspace = workspace
-        p = Path(workspace)
-        name = p.name or str(p)
-        self._cwd_btn.setText(_elide_label(name, 16))
-        self._cwd_btn.setToolTip(f"Workspace: {workspace}\nClick to change folder")
+    def set_workspace(self, workspace: str, recent_workspaces: list[str] | None = None) -> None:
+        clean = workspace.strip()
+        self._workspace = clean
+        if recent_workspaces is not None:
+            self._recent_workspaces = list(recent_workspaces)
+        pal = get_palette()
+        if clean:
+            p = Path(clean)
+            name = p.name or str(p)
+            self._cwd_btn.setText(_elide_label(name, 16))
+            self._cwd_btn.setIcon(lucide_icon("folder", pal.text_faint, 12))
+            self._cwd_btn.setToolTip(f"Project: {clean}\nClick to switch or clear")
+        else:
+            self._cwd_btn.setText("No Project")
+            self._cwd_btn.setIcon(lucide_icon("message-square", pal.text_faint, 12))
+            self._cwd_btn.setToolTip("No project selected (general chat)\nClick to choose a project folder")
         if hasattr(self, "_settings_page"):
-            self._settings_page.set_workspace(workspace)
+            self._settings_page.set_workspace(clean)
+
+    def set_start_without_project(self, enabled: bool) -> None:
+        """Sync the start-without-project default toggle on the settings page."""
+        self._start_without_project = enabled
+        if hasattr(self, "_settings_page"):
+            self._settings_page.set_start_without_project(enabled)
 
     def select_agent_in_combo(self, agent_id: str) -> None:
         self._current_agent_id = agent_id
@@ -1349,10 +1373,67 @@ class ChatDrawer(QWidget):
             self.reconnect_requested.emit()
 
     def _pick_workspace(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Choose Workspace Folder", self._workspace)
+        start_dir = (
+            self._workspace
+            or (self._recent_workspaces[0] if self._recent_workspaces else "")
+            or str(Path.home())
+        )
+        folder = QFileDialog.getExistingDirectory(self, "Choose Project Folder", start_dir)
         if folder:
             self.set_workspace(folder)
             self.workspace_selected.emit(folder)
+
+    def _clear_workspace(self) -> None:
+        if not self._workspace:
+            return
+        self.set_workspace("")
+        self.workspace_selected.emit("")
+
+    def _select_workspace_direct(self, folder: str) -> None:
+        if folder == self._workspace:
+            return
+        self.set_workspace(folder)
+        self.workspace_selected.emit(folder)
+
+    def _on_start_without_project_toggled(self, enabled: bool) -> None:
+        self._start_without_project = enabled
+        if hasattr(self, "_settings_page"):
+            self._settings_page.set_start_without_project(enabled)
+        self.start_without_project_toggled.emit(enabled)
+
+    def _populate_project_menu(self, menu: PocketMenu) -> None:
+        project_group = QActionGroup(menu)
+        menu.add_check(
+            "No Project (General Chat)",
+            not self._workspace,
+            lambda _c=False: self._select_workspace_direct(""),
+            group=project_group,
+        )
+        if self._recent_workspaces:
+            menu.addSeparator()
+            for folder in self._recent_workspaces:
+                label = Path(folder).name or folder
+                menu.add_check(
+                    label,
+                    bool(self._workspace) and os.path.normcase(self._workspace) == os.path.normcase(folder),
+                    lambda _c=False, f=folder: self._select_workspace_direct(f),
+                    group=project_group,
+                    tooltip=folder,
+                )
+        menu.addSeparator()
+        menu.add_item("Choose Project Folder...", self._pick_workspace, icon="folder-open")
+        menu.addSeparator()
+        menu.add_check(
+            "Start without a project by default",
+            self._start_without_project,
+            self._on_start_without_project_toggled,
+        )
+
+    def _show_project_menu(self) -> None:
+        menu = PocketMenu(parent=self)
+        self._populate_project_menu(menu)
+        pos = self._cwd_btn.mapToGlobal(QPoint(0, self._cwd_btn.height() + 4))
+        menu.exec(pos)
 
     def _export_markdown(self) -> None:
         if not self._turns:
@@ -1377,7 +1458,8 @@ class ChatDrawer(QWidget):
         menu.add_item("New Chat", self._on_new_chat_clicked, icon="plus")
         menu.add_item("Reconnect Agent", self.reconnect_requested.emit, icon="refresh-cw")
         menu.add_item("Connect an AI (Setup Guide)...", self.setup_guide_requested.emit, icon="book-open")
-        menu.add_item("Change Workspace Folder...", self._pick_workspace, icon="folder")
+        project_menu = menu.add_submenu("Project", "folder")
+        self._populate_project_menu(project_menu)
         menu.add_item("Copy Chat as Markdown", self._export_markdown, icon="copy", enabled=bool(self._turns))
         menu.add_check("Show Thinking Blocks", self._show_thoughts, self._on_toggle_thoughts)
 

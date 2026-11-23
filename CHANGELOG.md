@@ -2,6 +2,13 @@
 
 All notable changes to Pocket Agent will be documented in this file.
 
+## [0.4.0] - 2026-11-23
+
+### Added
+- **No Project (general chat) mode by default**: `start_without_project` defaults to `True` and `workspace` defaults to `""`, routing unattached sessions to an isolated empty scratch folder (`~/.pocket-agent/scratch`) instead of loading a repository or home directory context.
+- Header project menu pill (**No Project** / active folder), **More -> Project** submenu, and **Pet context menu -> Project** submenu with quick switching between **No Project (General Chat)**, recent project folders, **Choose Project Folder...**, and the **Start without a project by default** toggle.
+- **Chat & Project** controls in Settings with a **Start without a project by default** checkbox and a **No Project** button to clear the active project.
+
 ## [0.3.0] - 2026-11-23
 
 ### Added

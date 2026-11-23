@@ -35,7 +35,9 @@ class SettingsPage(QWidget):
     always_on_top_toggled = pyqtSignal(bool)
     startup_toggled = pyqtSignal(bool)
     thoughts_toggled = pyqtSignal(bool)
+    start_without_project_toggled = pyqtSignal(bool)
     workspace_browse_requested = pyqtSignal()
+    workspace_clear_requested = pyqtSignal()
     auto_update_toggled = pyqtSignal(bool)
     check_updates_requested = pyqtSignal()
     apply_update_requested = pyqtSignal()
@@ -51,6 +53,7 @@ class SettingsPage(QWidget):
         launch_at_startup: bool = False,
         show_thoughts: bool = True,
         workspace: str = "",
+        start_without_project: bool = True,
         check_updates_on_startup: bool = True,
         parent: QWidget | None = None,
     ) -> None:
@@ -68,6 +71,7 @@ class SettingsPage(QWidget):
             launch_at_startup=launch_at_startup,
             show_thoughts=show_thoughts,
             workspace=workspace,
+            start_without_project=start_without_project,
             check_updates_on_startup=check_updates_on_startup,
         )
         self.apply_theme()
@@ -83,6 +87,7 @@ class SettingsPage(QWidget):
         launch_at_startup: bool,
         show_thoughts: bool,
         workspace: str,
+        start_without_project: bool,
         check_updates_on_startup: bool,
     ) -> None:
         root = QVBoxLayout(self)
@@ -199,21 +204,32 @@ class SettingsPage(QWidget):
         layout.addWidget(app_card)
 
         # ---- Chat & Workspace Card ----
-        chat_card, c_lay = self._make_card("Chat & Workspace", container)
+        chat_card, c_lay = self._make_card("Chat & Project", container)
         self._thoughts_cb = QCheckBox("Show Thinking Blocks", chat_card)
         self._thoughts_cb.setChecked(show_thoughts)
         self._thoughts_cb.toggled.connect(self.thoughts_toggled.emit)
         c_lay.addWidget(self._thoughts_cb)
 
-        ws_lbl = QLabel("Workspace Folder", chat_card)
+        self._no_project_default_cb = QCheckBox("Start without a project by default", chat_card)
+        self._no_project_default_cb.setChecked(start_without_project)
+        self._no_project_default_cb.toggled.connect(self.start_without_project_toggled.emit)
+        c_lay.addWidget(self._no_project_default_cb)
+
+        ws_lbl = QLabel("Active Project", chat_card)
         self._field_labels.append(ws_lbl)
         c_lay.addWidget(ws_lbl)
 
         ws_row = QHBoxLayout()
         ws_row.setSpacing(8)
-        self._workspace_val = QLabel(workspace or ".", chat_card)
+        self._workspace_val = QLabel(workspace or "No project (general chat)", chat_card)
         self._workspace_val.setWordWrap(True)
         ws_row.addWidget(self._workspace_val, 1)
+
+        self._clear_ws_btn = QPushButton("No Project", chat_card)
+        self._clear_ws_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._clear_ws_btn.setEnabled(bool(workspace))
+        self._clear_ws_btn.clicked.connect(self.workspace_clear_requested.emit)
+        ws_row.addWidget(self._clear_ws_btn)
 
         self._browse_ws_btn = QPushButton("Browse...", chat_card)
         self._browse_ws_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -324,7 +340,14 @@ class SettingsPage(QWidget):
         self._thoughts_cb.blockSignals(False)
 
     def set_workspace(self, folder: str) -> None:
-        self._workspace_val.setText(folder or ".")
+        clean = folder.strip()
+        self._workspace_val.setText(clean or "No project (general chat)")
+        self._clear_ws_btn.setEnabled(bool(clean))
+
+    def set_start_without_project(self, enabled: bool) -> None:
+        self._no_project_default_cb.blockSignals(True)
+        self._no_project_default_cb.setChecked(enabled)
+        self._no_project_default_cb.blockSignals(False)
 
     def set_check_updates_on_startup(self, enabled: bool) -> None:
         self._auto_update_cb.blockSignals(True)
@@ -385,6 +408,7 @@ class SettingsPage(QWidget):
             self._top_cb,
             self._startup_cb,
             self._thoughts_cb,
+            self._no_project_default_cb,
             self._auto_update_cb,
         ):
             cb.setStyleSheet(cb_qss)
@@ -432,6 +456,7 @@ class SettingsPage(QWidget):
             self._stop_voice_btn,
             self._manage_orbs_btn,
             self._open_orbkit_btn,
+            self._clear_ws_btn,
             self._browse_ws_btn,
             self._check_updates_btn,
             self._apply_update_btn,

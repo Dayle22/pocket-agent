@@ -21,6 +21,7 @@ from pocket_agent.config import (
     CONFIG_DIR,
     AppConfig,
     get_launch_at_startup,
+    resolve_session_cwd,
     set_launch_at_startup,
 )
 from pocket_agent.engine.catalog import BUILTIN_ASSETS_DIR, PetCatalog
@@ -147,16 +148,24 @@ class PocketAgentApp(QObject):
         self._working_phrase_timer.setInterval(3200)
         self._working_phrase_timer.timeout.connect(self._advance_working_phrase)
         launch_at_startup = get_launch_at_startup()
+        if self.config.workspace and Path(self.config.workspace).is_dir():
+            self.config.record_recent_workspace(self.config.workspace)
+        self._active_workspace = (
+            ""
+            if self.config.start_without_project
+            else (self.config.workspace if self.config.workspace and Path(self.config.workspace).is_dir() else "")
+        )
         self.pet = PetWindow(
             self.config,
             self.catalog,
             self.registry.all(),
             launch_at_startup=launch_at_startup,
+            active_workspace=self._active_workspace,
         )
         self.drawer = ChatDrawer(
             agents=self.registry.all(),
             current_agent_id=self.config.agent_id,
-            workspace=self.config.workspace,
+            workspace=self._active_workspace,
             always_on_top=self.config.always_on_top,
             launch_at_startup=launch_at_startup,
             theme_mode=self.config.theme,
@@ -164,6 +173,8 @@ class PocketAgentApp(QObject):
             voice_enabled=self.config.voice_enabled,
             voice_name=self.config.voice_name,
             check_updates_on_startup=self.config.check_updates_on_startup,
+            start_without_project=self.config.start_without_project,
+            recent_workspaces=self._existing_recent_workspaces(),
             width=self.config.drawer_width,
             height=self.config.drawer_height,
         )
@@ -194,6 +205,9 @@ class PocketAgentApp(QObject):
         self.pet.manage_orbs_requested.connect(self._open_orbkit_manager)
         self.pet.check_updates_requested.connect(self._check_updates_manual)
         self.pet.workspace_change_requested.connect(self._prompt_workspace)
+        self.pet.workspace_selected.connect(self._switch_workspace)
+        self.pet.workspace_clear_requested.connect(lambda: self._switch_workspace(""))
+        self.pet.start_without_project_toggled.connect(self._set_start_without_project)
         self.pet.always_on_top_changed.connect(self.drawer.set_always_on_top)
         self.pet.startup_toggled.connect(self._set_launch_at_startup)
         self.pet.theme_selected.connect(self._set_theme_mode)
@@ -212,6 +226,7 @@ class PocketAgentApp(QObject):
         self.drawer.mode_selected.connect(self.bridge.set_mode)
         self.drawer.config_option_selected.connect(self.bridge.set_config_option)
         self.drawer.workspace_selected.connect(self._switch_workspace)
+        self.drawer.start_without_project_toggled.connect(self._set_start_without_project)
         self.drawer.new_session_requested.connect(self._new_session)
         self.drawer.reconnect_requested.connect(self._reconnect_agent)
         self.drawer.setup_guide_requested.connect(self._open_setup_guide)
@@ -309,9 +324,12 @@ class PocketAgentApp(QObject):
         self._waiting_permission = False
         self._sync_working_bubble()
 
+    def _existing_recent_workspaces(self) -> list[str]:
+        return [p for p in self.config.recent_workspaces if Path(p).is_dir()]
+
     def _connect_current_agent(self) -> None:
         spec = self.registry.get(self.config.agent_id) or self.registry.default_available()
-        cwd = self.config.workspace if Path(self.config.workspace).is_dir() else str(Path.home())
+        cwd = resolve_session_cwd(self._active_workspace)
         if not spec.is_available():
             self.drawer.add_system_message(
                 "No ACP agent CLI found on PATH. Install one (for example `agy`, `gemini`, "
@@ -333,20 +351,41 @@ class PocketAgentApp(QObject):
         self._connect_current_agent()
 
     def _switch_workspace(self, folder: str) -> None:
-        self.config.workspace = folder
+        clean = folder.strip()
+        self._active_workspace = clean
+        self.config.workspace = clean
+        if clean:
+            self.config.record_recent_workspace(clean)
         self.config.save()
-        self.drawer.add_system_message(f"Workspace switched to {folder}")
+
+        recent = self._existing_recent_workspaces()
+        self.drawer.set_workspace(clean, recent_workspaces=recent)
+        self.pet.set_active_workspace(clean, recent_workspaces=recent)
         self._new_session()
+        if clean:
+            self.drawer.add_system_message(f"Project switched to {clean}")
+        else:
+            self.drawer.add_system_message("Switched to No Project (general chat)")
 
     def _prompt_workspace(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self.drawer, "Choose Workspace Folder", self.config.workspace)
+        start_dir = (
+            self._active_workspace
+            or (self._existing_recent_workspaces()[0] if self._existing_recent_workspaces() else "")
+            or str(Path.home())
+        )
+        folder = QFileDialog.getExistingDirectory(self.drawer, "Choose Project Folder", start_dir)
         if folder:
-            self.drawer.set_workspace(folder)
             self._switch_workspace(folder)
+
+    def _set_start_without_project(self, enabled: bool) -> None:
+        self.config.start_without_project = enabled
+        self.config.save()
+        self.drawer.set_start_without_project(enabled)
+        self.pet.set_start_without_project(enabled)
 
     def _new_session(self) -> None:
         self.drawer.clear_chat()
-        cwd = self.config.workspace if Path(self.config.workspace).is_dir() else str(Path.home())
+        cwd = resolve_session_cwd(self._active_workspace)
         self.bridge.new_session(cwd)
 
     def _reconnect_agent(self) -> None:
