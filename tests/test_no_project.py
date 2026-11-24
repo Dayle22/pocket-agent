@@ -8,7 +8,6 @@ from pocket_agent.agents import BUILTIN_AGENTS
 from pocket_agent.app import PocketAgentApp
 from pocket_agent.config import AppConfig, resolve_session_cwd
 from pocket_agent.ui.drawer import ChatDrawer
-from pocket_agent.ui.settings_page import SettingsPage
 
 
 def test_app_config_defaults_to_no_project_and_roundtrips(tmp_path) -> None:
@@ -45,6 +44,21 @@ def test_resolve_session_cwd_uses_isolated_scratch_when_no_project(tmp_path) -> 
     assert resolve_session_cwd(str(tmp_path / "missing"), no_project_dir=scratch) == str(scratch)
 
 
+def test_existing_profile_keeps_voice_and_remembers_new_preferences(tmp_path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text('{"voice_enabled": true, "agent_id": "gemini"}', encoding="utf-8")
+    cfg = AppConfig.load(path)
+    assert cfg.voice_enabled and cfg.show_thoughts
+    cfg.show_thoughts = False
+    cfg.chat_text_size = 17
+    cfg.reduced_motion = True
+    cfg.default_agent_id = "codex"
+    cfg.save(path)
+    loaded = AppConfig.load(path)
+    assert loaded == cfg
+    assert not AppConfig.load(tmp_path / "fresh.json").voice_enabled
+
+
 def test_drawer_and_settings_no_project_controls(qapp, tmp_path) -> None:
     proj = tmp_path / "alpha"
     proj.mkdir()
@@ -62,19 +76,14 @@ def test_drawer_and_settings_no_project_controls(qapp, tmp_path) -> None:
     drawer.start_without_project_toggled.connect(default_toggles.append)
 
     assert drawer._cwd_btn.text() == "No Project"
-    assert drawer._settings_page._workspace_val.text() == "No project (general chat)"
-    assert drawer._settings_page._clear_ws_btn.isEnabled() is False
     assert drawer._settings_page._no_project_default_cb.isChecked() is True
 
     drawer._select_workspace_direct(str(proj))
     assert drawer._cwd_btn.text() == "alpha"
-    assert drawer._settings_page._workspace_val.text() == str(proj)
-    assert drawer._settings_page._clear_ws_btn.isEnabled() is True
     assert selected_ws == [str(proj)]
 
-    drawer._settings_page._clear_ws_btn.click()
+    drawer._select_workspace_direct("")
     assert drawer._cwd_btn.text() == "No Project"
-    assert drawer._settings_page._clear_ws_btn.isEnabled() is False
     assert selected_ws == [str(proj), ""]
 
     drawer._settings_page._no_project_default_cb.setChecked(False)
@@ -88,22 +97,18 @@ def test_drawer_and_settings_no_project_controls(qapp, tmp_path) -> None:
     qapp.processEvents()
 
 
-def test_settings_page_no_project_checkbox_and_clear_button(qapp) -> None:
-    page = SettingsPage(workspace="C:/some/project", start_without_project=True)
-    cleared: list[bool] = []
-    toggled: list[bool] = []
-    page.workspace_clear_requested.connect(lambda: cleared.append(True))
-    page.start_without_project_toggled.connect(toggled.append)
-
-    assert page._clear_ws_btn.isEnabled() is True
-    page._clear_ws_btn.click()
-    assert cleared == [True]
-
-    page._no_project_default_cb.setChecked(False)
-    assert toggled == [False]
-
-    page.deleteLater()
-    qapp.processEvents()
+def test_startup_project_preference_preserves_active_chat(qapp, tmp_path) -> None:
+    drawer = ChatDrawer(agents=list(BUILTIN_AGENTS), current_agent_id="agy", workspace=str(tmp_path))
+    changes = []
+    drawer.workspace_selected.connect(changes.append)
+    drawer.append_user_message("Keep this conversation")
+    drawer.open_settings()
+    drawer.settings.open_section("Agent & chat")
+    drawer.settings._no_project_default_cb.setChecked(False)
+    assert changes == []
+    assert drawer._workspace == str(tmp_path)
+    assert [turn.text for turn in drawer._turns if turn.role == "user"] == ["Keep this conversation"]
+    drawer.close()
 
 
 def test_app_starts_without_project_by_default_and_switches(qapp, monkeypatch, tmp_path) -> None:

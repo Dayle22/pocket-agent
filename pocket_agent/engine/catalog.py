@@ -29,18 +29,7 @@ def _resolve_builtin_assets_dir() -> Path:
 BUILTIN_ASSETS_DIR = _resolve_builtin_assets_dir()
 BUILTIN_POCKETBOT_ID = "pocketbot"
 
-FEATURED_EXTERNAL_IDS = [
-    "firefly--lingxiaotian",
-    "acheron--lingxiaotian",
-    "furina--lingxiaotian",
-    "frieren--lingxiaotian",
-    "arlecchino--lingxiaotian",
-    "sparkle--lingxiaotian",
-    "nahida--lingxiaotian",
-    "paimon--lingxiaotian",
-    "raiden-shogun--lingxiaotian",
-    "bocchi--lingxiaotian",
-]
+_ANIME_PET_IDS = ("frieren--lingxiaotian", "bocchi--lingxiaotian")
 
 
 @dataclass(frozen=True)
@@ -56,6 +45,22 @@ class PetInfo:
     custom_orb: CustomOrbDefinition | None = None
 
 
+def ensure_pocketbot_sheet(*, drop_shadow: bool = True, assets_dir: Path | None = None) -> Path:
+    """Return the built-in PocketBot spritesheet path, generating it if missing."""
+    root = assets_dir or BUILTIN_ASSETS_DIR
+    filename = "pocketbot_sheet.png" if drop_shadow else "pocketbot_no_shadow.png"
+    target = root / filename
+    if target.exists():
+        return target
+    try:
+        return generate_pocketbot_sheet(target, drop_shadow=drop_shadow)
+    except OSError:
+        fallback = root / "pocketbot_sheet.png"
+        if not drop_shadow and fallback.exists():
+            return fallback
+        raise
+
+
 class PetCatalog:
     """Scans built-in and configured external pet directories."""
 
@@ -63,18 +68,18 @@ class PetCatalog:
         self,
         extra_dirs: Iterable[str | Path] = (),
         custom_orbs_dir: str | Path | None = None,
+        active_pet_id: str = "",
     ) -> None:
         self._pets: dict[str, PetInfo] = {}
         self.extra_dirs = [Path(d) for d in extra_dirs]
         self.custom_orbs_dir = Path(custom_orbs_dir) if custom_orbs_dir is not None else None
+        self.active_pet_id = active_pet_id
         self.refresh()
 
     def refresh(self) -> None:
         self._pets.clear()
 
-        pocketbot_sheet = BUILTIN_ASSETS_DIR / "pocketbot_sheet.png"
-        if not pocketbot_sheet.exists():
-            generate_pocketbot_sheet(pocketbot_sheet)
+        pocketbot_sheet = ensure_pocketbot_sheet(drop_shadow=True)
 
         self._pets[BUILTIN_POCKETBOT_ID] = PetInfo(
             id=BUILTIN_POCKETBOT_ID,
@@ -111,14 +116,22 @@ class PetCatalog:
         for root in self.extra_dirs:
             if not root.is_dir():
                 continue
-            for folder in sorted(root.iterdir()):
+            if root.parent.name.lower() == "awesome-antigravity-pet":
+                # Keep two choices from the auto-discovered library and preserve saved selections.
+                ids = dict.fromkeys((*_ANIME_PET_IDS, self.active_pet_id))
+                folders = [root / pet_id for pet_id in ids if Path(pet_id).parts == (pet_id,) and pet_id != ".."]
+            else:
+                folders = sorted(root.iterdir())
+            for folder in folders:
                 if not folder.is_dir():
                     continue
                 sheet = _find_spritesheet(folder)
                 if sheet is None:
                     continue
-                display_name, desc = _read_pet_meta(folder)
                 pet_id = folder.name
+                if pet_id in self._pets:
+                    continue
+                display_name, desc = _read_pet_meta(folder)
                 self._pets[pet_id] = PetInfo(
                     id=pet_id,
                     display_name=display_name,
@@ -144,13 +157,6 @@ class PetCatalog:
     def characters(self) -> list[PetInfo]:
         """Return all sprite-based companions (built-in and external)."""
         return [p for p in self._pets.values() if p.orb_id is None]
-
-    def featured(self) -> list[PetInfo]:
-        items: list[PetInfo] = [self._pets[BUILTIN_POCKETBOT_ID]]
-        for pid in FEATURED_EXTERNAL_IDS:
-            if pid in self._pets:
-                items.append(self._pets[pid])
-        return items
 
 
 def _find_spritesheet(folder: Path) -> Path | None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 from dataclasses import dataclass, field
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QEnterEvent
 from PyQt6.QtWidgets import (
     QApplication,
@@ -316,9 +316,13 @@ class _CopyActionButton(QPushButton):
 class MessageBubbleWidget(QFrame):
     """User card or borderless assistant message matching obsidian-agent-client."""
 
+    read_requested = pyqtSignal(str)
+
     def __init__(self, turn: ChatTurn, show_thoughts: bool = True, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.turn = turn
+        self._text_size = 13
+        self._speak_btn: QPushButton | None = None
         self._show_thoughts = show_thoughts
         self._tool_widgets: dict[str, ToolCallWidget] = {}
         self._thought_widget: CollapsibleThoughtWidget | None = None
@@ -355,6 +359,14 @@ class MessageBubbleWidget(QFrame):
             self._root.setSpacing(4)
             self._sync_assistant()
 
+        if turn.role == "assistant":
+            self._speak_btn = QPushButton("Read aloud", self)
+            self._speak_btn.setAccessibleName("Read this reply aloud")
+            self._speak_btn.setToolTip("Read this reply using Microsoft online speech")
+            self._speak_btn.clicked.connect(lambda: self.read_requested.emit(self.turn.text))
+            self._speak_btn.setVisible(bool(turn.text.strip()))
+            self._root.addWidget(self._speak_btn, 0, Qt.AlignmentFlag.AlignLeft)
+
         self._copy_btn: _CopyActionButton | None = None
         if turn.role in ("user", "assistant"):
             self._copy_btn = _CopyActionButton(lambda: self.turn.text, self)
@@ -371,7 +383,7 @@ class MessageBubbleWidget(QFrame):
             )
             if self._text_label is not None:
                 self._text_label.setStyleSheet(
-                    f"background: transparent; color: {pal.text_normal}; font-family: {FONT_UI}; font-size: 13px;"
+                    f"background: transparent; color: {pal.text_normal}; font-family: {FONT_UI}; font-size: {self._text_size}px;"
                 )
         elif self.turn.role == "system":
             self.setStyleSheet("#MessageBubble { background: transparent; border: none; }")
@@ -391,12 +403,22 @@ class MessageBubbleWidget(QFrame):
                 tw.apply_theme()
             if self._text_label is not None:
                 self._text_label.setStyleSheet(
-                    f"background: transparent; color: {pal.text_normal}; font-family: {FONT_UI}; font-size: 13px;"
+                    f"background: transparent; color: {pal.text_normal}; font-family: {FONT_UI}; font-size: {self._text_size}px;"
                 )
                 self._text_label.setText(render_markdown_html(self.turn.text))
 
+        if self._speak_btn is not None:
+            self._speak_btn.setIcon(lucide_icon("volume-2", pal.text_muted, 13))
+            self._speak_btn.setStyleSheet(f"QPushButton {{ color: {pal.text_muted}; background: transparent; "
+                                          f"border: 1px solid {pal.border_subtle}; border-radius: 5px; padding: 3px 6px; }}"
+                                          f"QPushButton:focus {{ border-color: {pal.accent}; }}")
         if self._copy_btn is not None:
             self._copy_btn.apply_theme()
+
+    def set_text_size(self, size: int) -> None:
+        if size != self._text_size:
+            self._text_size = size
+            self.apply_theme()
 
     def set_show_thoughts(self, show: bool) -> None:
         self._show_thoughts = show
@@ -421,7 +443,7 @@ class MessageBubbleWidget(QFrame):
             if widget is None:
                 widget = ToolCallWidget(entry, self)
                 self._tool_widgets[entry.tool_call_id] = widget
-                insert_idx = self._root.count() - (1 if self._text_label is not None else 0)
+                insert_idx = self._root.count() - int(self._text_label is not None) - int(self._speak_btn is not None)
                 self._root.insertWidget(max(0, insert_idx), widget)
             else:
                 widget.update_entry(entry)
@@ -430,10 +452,13 @@ class MessageBubbleWidget(QFrame):
             if self._text_label is None:
                 self._text_label = _rich_text_label(self, font_size=13)
                 self._text_label.setStyleSheet(
-                    f"background: transparent; color: {pal.text_normal}; font-family: {FONT_UI}; font-size: 13px;"
+                    f"background: transparent; color: {pal.text_normal}; font-family: {FONT_UI}; font-size: {self._text_size}px;"
                 )
-                self._root.addWidget(self._text_label)
+                before = self._root.indexOf(self._speak_btn) if self._speak_btn else -1
+                self._root.insertWidget(before, self._text_label)
             self._text_label.setText(render_markdown_html(self.turn.text))
+            if self._speak_btn is not None:
+                self._speak_btn.show()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)

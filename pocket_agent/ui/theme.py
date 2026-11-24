@@ -209,6 +209,8 @@ def apply_windows_backdrop(
     is_dark: bool,
     blur: bool,
     tint_rgba: tuple[int, int, int, int] | None = None,
+    *,
+    drop_shadow: bool = True,
 ) -> bool:
     """Apply Windows Acrylic blur with configurable tint opacity + rounded corners."""
     if os.name != "nt":
@@ -220,7 +222,10 @@ def apply_windows_backdrop(
         dwmapi = ctypes.windll.dwmapi
         user32 = ctypes.windll.user32
 
-        margins = _MARGINS(-1, -1, -1, -1) if blur else _MARGINS(0, 0, 0, 0)
+        # 2 = DWMWA_NCRENDERING_POLICY -> 2 = DWMNCRP_ENABLED, 1 = DWMNCRP_DISABLED
+        dwmapi.DwmSetWindowAttribute(hwnd, 2, ctypes.byref(ctypes.c_int(2 if drop_shadow else 1)), 4)
+
+        margins = _MARGINS(-1, -1, -1, -1) if (blur and drop_shadow) else _MARGINS(0, 0, 0, 0)
         dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
 
         # 33 = DWMWA_WINDOW_CORNER_PREFERENCE -> 2 = DWMWCP_ROUND

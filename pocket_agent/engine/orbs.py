@@ -530,6 +530,7 @@ class OrbPlayer:
         orb_id: str,
         static_idle: bool = False,
         custom_orb: CustomOrbDefinition | None = None,
+        drop_shadow: bool = True,
     ) -> None:
         self.custom_orb: CustomOrbDefinition | None = custom_orb
         if custom_orb is not None:
@@ -550,6 +551,7 @@ class OrbPlayer:
             self.spec = ORB_REGISTRY.get(orb_id) or ORB_REGISTRY["siri-sheet"]
         self.orb_id: str = self.spec.id
         self.static_idle: bool = static_idle
+        self.drop_shadow = drop_shadow
 
         self.orb_state: str = "idle"
         self.mix: StateMix = StateMix("idle")
@@ -966,7 +968,8 @@ class OrbPlayer:
         cx, cy, draw_half = self.compute_draw_geometry(rect)
         target_rect = QRectF(cx - draw_half, cy - draw_half, draw_half * 2.0, draw_half * 2.0)
 
-        self._draw_contact_shadow(painter, cx_base, cy_base, side, draw_half, shake_x, w)
+        if self.drop_shadow:
+            self._draw_contact_shadow(painter, cx_base, cy_base, side, draw_half, shake_x, w)
 
         dev = painter.device()
         dpr = max(1.0, float(dev.devicePixelRatioF())) if dev is not None else 1.0

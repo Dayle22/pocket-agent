@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import ctypes
-import os
 import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
-    QActionGroup,
     QBrush,
     QColor,
     QContextMenuEvent,
@@ -17,118 +15,39 @@ from PyQt6.QtGui import (
     QImage,
     QMouseEvent,
     QPainter,
-    QPixmap,
     QRadialGradient,
 )
 from PyQt6.QtWidgets import (
     QApplication,
-    QDialog,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QSystemTrayIcon,
-    QVBoxLayout,
     QWidget,
 )
 
 from pocket_agent.agents import AgentSpec
 from pocket_agent.config import AppConfig
-from pocket_agent.engine.catalog import PetCatalog, PetInfo
+from pocket_agent.engine.catalog import BUILTIN_ASSETS_DIR, BUILTIN_POCKETBOT_ID, PetCatalog, ensure_pocketbot_sheet
 from pocket_agent.engine.fsm import STATE_TO_ACTION, PetAction, PetState
 from pocket_agent.engine.orbs import BG_OVERSCAN, PET_STATE_TO_ORB_STATE, OrbPlayer, approach
 from pocket_agent.engine.spritesheet import CELL_HEIGHT, CELL_WIDTH, SpritePlayer, SpriteSheet
 from pocket_agent.ui.bubble import SpeechBubble
 from pocket_agent.ui.menus import PocketMenu
-from pocket_agent.ui.theme import FONT_UI, apply_windows_backdrop, get_palette
-from pocket_agent.voice import VOICE_PRESETS
-
-
-class _PetPickerDialog(QDialog):
-    """Searchable character picker for browsing large sprite packs."""
-
-    def __init__(self, pets: list[PetInfo], current_id: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Choose Companion Character")
-        self.resize(340, 440)
-        self.selected_pet_id: str | None = None
-
-        pal = get_palette()
-        self.setStyleSheet(
-            f"QDialog {{ background: {pal.bg_primary}; color: {pal.text_normal}; font-family: {FONT_UI}; font-size: 12px; }}"
-            f"QLineEdit {{ background: {pal.bg_secondary}; color: {pal.text_normal}; border: 1px solid {pal.border}; "
-            f"border-radius: 8px; padding: 7px 10px; selection-background-color: {pal.accent}; }}"
-            f"QLineEdit:focus {{ border-color: {pal.accent}; }}"
-            f"QListWidget {{ background: {pal.bg_secondary}; color: {pal.text_normal}; border: 1px solid {pal.border}; "
-            "border-radius: 10px; padding: 5px; outline: none; }"
-            "QListWidget::item { padding: 6px 8px; border-radius: 6px; }"
-            f"QListWidget::item:hover {{ background: {pal.bg_hover}; }}"
-            f"QListWidget::item:selected {{ background: {pal.accent}; color: #ffffff; }}"
-            "QScrollBar:vertical { background: transparent; width: 6px; margin: 4px 1px; }"
-            f"QScrollBar::handle:vertical {{ background: {pal.border}; border-radius: 3px; min-height: 24px; }}"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
-        )
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("Search characters...")
-        self._search.textChanged.connect(self._filter)
-        layout.addWidget(self._search)
-
-        self._list = QListWidget()
-        self._all_pets = pets
-        self._populate(pets, current_id)
-        self._list.itemDoubleClicked.connect(self._on_pick)
-        self._list.itemActivated.connect(self._on_pick)
-        layout.addWidget(self._list)
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        # Dark/light title bar + rounded corners so it matches the chat drawer.
-        apply_windows_backdrop(self, is_dark=get_palette().is_dark, blur=False)
-
-    def _populate(self, pets: list[PetInfo], current_id: str) -> None:
-        self._list.clear()
-        for pet in pets:
-            item = QListWidgetItem(pet.display_name)
-            item.setData(Qt.ItemDataRole.UserRole, pet.id)
-            self._list.addItem(item)
-            if pet.id == current_id:
-                self._list.setCurrentItem(item)
-
-    def _filter(self, query: str) -> None:
-        q = query.strip().lower()
-        filtered = [p for p in self._all_pets if q in p.display_name.lower() or q in p.id.lower()]
-        self._populate(filtered, "")
-
-    def _on_pick(self, item: QListWidgetItem) -> None:
-        self.selected_pet_id = str(item.data(Qt.ItemDataRole.UserRole))
-        self.accept()
+from pocket_agent.ui.theme import get_palette
 
 
 class PetWindow(QWidget):
     """Frameless transparent animated sprite window floating over Windows."""
 
     toggle_drawer_requested = pyqtSignal()
-    agent_selected = pyqtSignal(str)
     new_session_requested = pyqtSignal()
     reconnect_requested = pyqtSignal()
     setup_guide_requested = pyqtSignal()
     settings_requested = pyqtSignal()
-    manage_orbs_requested = pyqtSignal()
+    companion_requested = pyqtSignal()
+    show_chat_requested = pyqtSignal()
     check_updates_requested = pyqtSignal()
-    workspace_change_requested = pyqtSignal()
-    workspace_selected = pyqtSignal(str)
-    workspace_clear_requested = pyqtSignal()
-    start_without_project_toggled = pyqtSignal(bool)
     always_on_top_changed = pyqtSignal(bool)
     startup_toggled = pyqtSignal(bool)
-    theme_selected = pyqtSignal(str)
-    blur_toggled = pyqtSignal(bool)
     voice_toggled = pyqtSignal(bool)
-    voice_selected = pyqtSignal(str)
-    stop_speaking_requested = pyqtSignal()
     exit_requested = pyqtSignal()
     moved = pyqtSignal(QRect)
 
@@ -143,14 +62,8 @@ class PetWindow(QWidget):
         super().__init__(None)
         self.config = config
         self.catalog = catalog
-        self.agents = agents
-        self.current_agent_id = config.agent_id
         self._launch_at_startup = launch_at_startup
-        self._active_workspace = active_workspace.strip()
-        self._recent_workspaces: list[str] = [p for p in config.recent_workspaces if Path(p).is_dir()]
-        self._start_without_project = config.start_without_project
-
-        self._sheets: dict[str, SpriteSheet] = {}
+        self._sheets: dict[Path, SpriteSheet] = {}
         self._player: SpritePlayer | OrbPlayer | None = None
         self._state = PetState.IDLE
         self._orb_state = "idle"
@@ -176,7 +89,9 @@ class PetWindow(QWidget):
 
         self._frame_timer = QTimer(self)
         self._frame_timer.timeout.connect(self._on_tick)
-        self._frame_timer.start(33)
+        if not config.reduced_motion:
+            self._frame_timer.start(33)
+        self.bubble.set_reduced_motion(config.reduced_motion)
 
         self._celebrate_timer = QTimer(self)
         self._celebrate_timer.setSingleShot(True)
@@ -284,42 +199,35 @@ class PetWindow(QWidget):
                 info.orb_id,
                 static_idle=self.config.static_idle,
                 custom_orb=info.custom_orb,
+                drop_shadow=self.config.drop_shadow,
             )
             self._player.set_orb_state(self._orb_state)
             self._bg_capture_elapsed_ms = 0
             self._capture_orb_background()
         else:
-            sheet = self._sheets.get(info.id)
+            path = info.spritesheet_path
+            if info.id == BUILTIN_POCKETBOT_ID and not self.config.drop_shadow:
+                path = ensure_pocketbot_sheet(drop_shadow=False)
+            sheet = self._sheets.get(path)
             if sheet is None:
-                sheet = SpriteSheet(info.spritesheet_path)
-                self._sheets[info.id] = sheet
+                sheet = SpriteSheet(path)
+                self._sheets[path] = sheet
             self._player = SpritePlayer(sheet, static_idle=self.config.static_idle)
             self._player.set_action(STATE_TO_ACTION[self._state])
 
-        self.config.pet_id = info.id
-        self.config.save()
-
-        if hasattr(self, "_tray") and self._player is not None:
-            pix = self._player.current_pixmap()
-            if pix is not None:
-                self._tray.setIcon(
-                    QIcon(
-                        pix.scaled(
-                            64,
-                            64,
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation,
-                        )
-                    )
-                )
+        if self.config.pet_id != info.id:
+            self.config.pet_id = info.id
+            self.config.save()
 
         self.update()
 
+    def update_drop_shadow(self) -> None:
+        if isinstance(self._player, OrbPlayer) or self.config.pet_id == BUILTIN_POCKETBOT_ID:
+            self._load_pet(self.config.pet_id)
+
     def _init_tray(self) -> None:
         self._tray = QSystemTrayIcon(self)
-        pix = self._player.current_pixmap() if self._player else None
-        if pix is not None:
-            self._tray.setIcon(QIcon(pix.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)))
+        self._tray.setIcon(QIcon(str(BUILTIN_ASSETS_DIR / "pocket_agent.ico")))
         self._tray.setToolTip("Pocket Agent (Ctrl+Shift+Space to toggle)")
         self._tray.activated.connect(self._on_tray_activated)
         self._build_tray_menu()
@@ -348,15 +256,11 @@ class PetWindow(QWidget):
         if hasattr(self, "_tray"):
             self._build_tray_menu()
 
-    def set_active_workspace(self, workspace: str, recent_workspaces: list[str] | None = None) -> None:
-        """Update the active project path shown in the pet context menu."""
-        self._active_workspace = workspace.strip()
-        if recent_workspaces is not None:
-            self._recent_workspaces = list(recent_workspaces)
-
-    def set_start_without_project(self, enabled: bool) -> None:
-        """Update the start-without-project default checkmark in the pet context menu."""
-        self._start_without_project = enabled
+    def set_idle_animation(self, enabled: bool) -> None:
+        self.config.static_idle = not enabled
+        self.config.save()
+        if self._player is not None:
+            self._player.static_idle = not enabled
 
     def apply_theme(self) -> None:
         """Re-tint theme-dependent chrome (tray menu) after a Dark/Light switch."""
@@ -420,6 +324,14 @@ class PetWindow(QWidget):
         if self._state == PetState.CELEBRATE:
             orb_state = "speaking" if self._voice_speaking else "idle"
             self.set_state(PetState.IDLE, orb_state=orb_state)
+
+    def set_reduced_motion(self, enabled: bool) -> None:
+        self.bubble.set_reduced_motion(enabled)
+        if enabled:
+            self._frame_timer.stop()
+        else:
+            self._frame_timer.start(33)
+        self.update()
 
     def _on_tick(self) -> None:
         if self._player is None:
@@ -561,140 +473,14 @@ class PetWindow(QWidget):
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # type: ignore[override]
         menu = PocketMenu(parent=self)
 
-        menu.add_item("Show / Hide Chat", self.toggle_drawer_requested.emit, icon="message-square", shortcut="Ctrl+Shift+Space")
-        menu.add_item("New Chat", self.new_session_requested.emit, icon="plus")
-        project_menu = menu.add_submenu("Project", "folder")
-        project_group = QActionGroup(project_menu)
-        project_menu.add_check(
-            "No Project (General Chat)",
-            not self._active_workspace,
-            lambda _c=False: self.workspace_clear_requested.emit(),
-            group=project_group,
-        )
-        if self._recent_workspaces:
-            project_menu.addSeparator()
-            for folder in self._recent_workspaces:
-                label = Path(folder).name or folder
-                project_menu.add_check(
-                    label,
-                    bool(self._active_workspace) and os.path.normcase(self._active_workspace) == os.path.normcase(folder),
-                    lambda _c=False, f=folder: self.workspace_selected.emit(f),
-                    group=project_group,
-                    tooltip=folder,
-                )
-        project_menu.addSeparator()
-        project_menu.add_item("Choose Project Folder...", self.workspace_change_requested.emit, icon="folder-open")
-        project_menu.addSeparator()
-        project_menu.add_check(
-            "Start without a project by default",
-            self._start_without_project,
-            self.start_without_project_toggled.emit,
-        )
-
-        menu.addSeparator()
-
-        agent_menu = menu.add_submenu("AI Agent", "sparkles")
-        agent_group = QActionGroup(agent_menu)
-        for spec in self.agents:
-            available = spec.is_available()
-            agent_menu.add_check(
-                spec.name if available else f"{spec.name} (missing)",
-                spec.id == self.current_agent_id,
-                lambda _c=False, aid=spec.id: self.agent_selected.emit(aid),
-                group=agent_group,
-                enabled=available,
-                tooltip=spec.description,
-            )
-        agent_menu.addSeparator()
-        agent_menu.add_item("Reconnect Agent", self.reconnect_requested.emit, icon="refresh-cw")
-        agent_menu.add_item("Connect an AI (Setup Guide)...", self.setup_guide_requested.emit, icon="book-open")
-
-        pet_menu = menu.add_submenu("Character", "smile")
-        pet_group = QActionGroup(pet_menu)
-        for pet in self.catalog.featured():
-            pet_menu.add_check(
-                pet.display_name,
-                pet.id == self.config.pet_id,
-                lambda _c=False, pid=pet.id: self._load_pet(pid),
-                group=pet_group,
-            )
-        all_pets = self.catalog.all()
-        if len(all_pets) > len(self.catalog.featured()):
-            pet_menu.addSeparator()
-            pet_menu.add_item(f"Browse All ({len(all_pets)})...", self._open_pet_picker, icon="search")
-
-        orb_menu = menu.add_submenu("Voice Orb", "circle-dot")
-        orb_group = QActionGroup(orb_menu)
-        for orb in [o for o in self.catalog.orbs() if o.custom_orb is None]:
-            orb_menu.add_check(
-                orb.display_name.removesuffix(" (Orb)"),
-                orb.id == self.config.pet_id,
-                lambda _c=False, pid=orb.id: self._load_pet(pid),
-                group=orb_group,
-            )
-        custom_orbs = self.catalog.custom_orbs()
-        if custom_orbs:
-            orb_menu.addSeparator()
-            for orb in custom_orbs:
-                orb_menu.add_check(
-                    orb.display_name.removesuffix(" (Orbkit)"),
-                    orb.id == self.config.pet_id,
-                    lambda _c=False, pid=orb.id: self._load_pet(pid),
-                    group=orb_group,
-                )
-        orb_menu.addSeparator()
-        orb_menu.add_item("Add / Manage Orbkit Orbs...", self.manage_orbs_requested.emit, icon="plus")
-
-        voice_menu = menu.add_submenu("Voice", "volume-2")
-        voice_menu.add_check("Read Replies Aloud", self.config.voice_enabled, self.voice_toggled.emit)
-        voice_menu.add_item("Stop Speaking", self.stop_speaking_requested.emit, icon="square")
-        voice_menu.addSeparator()
-        voice_group = QActionGroup(voice_menu)
-        for label, voice_id in VOICE_PRESETS:
-            voice_menu.add_check(
-                label,
-                self.config.voice_name == voice_id,
-                lambda _c=False, vid=voice_id: self.voice_selected.emit(vid),
-                group=voice_group,
-            )
-
-        scale_menu = menu.add_submenu("Size", "maximize-2")
-        scale_group = QActionGroup(scale_menu)
-        for label, val in [("Small", 0.3), ("Medium", 0.4), ("Normal", 0.5), ("Large", 0.6)]:
-            scale_menu.add_check(
-                label,
-                abs(self.config.pet_scale - val) < 0.05,
-                lambda _c=False, s=val: self._set_scale_and_save(s),
-                group=scale_group,
-            )
-
-        menu.addSeparator()
-
-        theme_menu = menu.add_submenu("Appearance", "sun")
-        theme_group = QActionGroup(theme_menu)
-        for label, mode in [("Auto (Windows)", "system"), ("Dark", "dark"), ("Light", "light")]:
-            theme_menu.add_check(
-                label,
-                self.config.theme == mode,
-                lambda _c=False, m=mode: self.theme_selected.emit(m),
-                group=theme_group,
-            )
-        theme_menu.addSeparator()
-        theme_menu.add_check("Translucent Blur (Acrylic)", self.config.backdrop_blur, self.blur_toggled.emit)
-        theme_menu.add_check("Always on Top", self.config.always_on_top, self._toggle_always_on_top)
-
-        menu.add_item("Check for Updates...", self.check_updates_requested.emit, icon="refresh-cw")
-        menu.add_item("Settings...", self.settings_requested.emit, icon="settings")
-
+        menu.add_item("Open chat", self.show_chat_requested.emit, icon="message-square", shortcut="Ctrl+Shift+Space")
+        menu.add_check("Mute automatic replies", not self.config.voice_enabled,
+                       lambda muted: self.voice_toggled.emit(not muted))
+        menu.add_item("Change companion…", self.companion_requested.emit, icon="smile")
+        menu.add_item("Settings…", self.settings_requested.emit, icon="settings")
         menu.addSeparator()
         menu.add_item("Quit Pocket Agent", self.exit_requested.emit, icon="power")
-
         menu.exec(event.globalPos())
-
-    def _open_pet_picker(self) -> None:
-        dlg = _PetPickerDialog(self.catalog.all(), self.config.pet_id, self)
-        if dlg.exec() and dlg.selected_pet_id:
-            self._load_pet(dlg.selected_pet_id)
 
     def _set_scale_and_save(self, scale: float) -> None:
         self._apply_scale(scale)

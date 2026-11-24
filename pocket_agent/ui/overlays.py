@@ -194,6 +194,8 @@ class PermissionDialogWidget(QFrame):
         self._queue: list[PermissionRequestData] = []
 
         self.setObjectName("PermissionDialog")
+        self.setAccessibleName("Review permission request")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setVisible(False)
 
         root = QVBoxLayout(self)
@@ -206,6 +208,7 @@ class PermissionDialogWidget(QFrame):
         header.addWidget(self._kind_icon)
 
         self._title_lbl = QLabel(self)
+        self._title_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._title_lbl.setWordWrap(True)
         header.addWidget(self._title_lbl, 1)
 
@@ -253,6 +256,10 @@ class PermissionDialogWidget(QFrame):
         )
         if self._queue:
             self._render_current()
+
+    @property
+    def current_request(self) -> PermissionRequestData | None:
+        return self._queue[0] if self._queue else None
 
     def enqueue(self, req: PermissionRequestData) -> None:
         self._queue.append(req)

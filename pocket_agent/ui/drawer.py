@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QPoint, QRect, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QActionGroup,
     QColor,
@@ -266,6 +266,7 @@ class _ToolbarMenuPill(QPushButton):
         self._current_value = current_value
         if title:
             self.setToolTip(title)
+            self.setAccessibleName(title)
         self._refresh_display()
 
     def set_current_value(self, value: str) -> None:
@@ -322,7 +323,8 @@ class _HeaderIconButton(QPushButton):
     def __init__(self, icon_name: str, tooltip: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._icon_name = icon_name
-        self.setFixedSize(24, 24)
+        self.setFixedSize(32, 32)
+        self.setAccessibleName(tooltip)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(tooltip)
         self.apply_theme()
@@ -393,6 +395,8 @@ class ChatDrawer(QWidget):
     update_action_requested = pyqtSignal()
     release_notes_requested = pyqtSignal()
     manage_orbs_requested = pyqtSignal()
+    thoughts_toggled = pyqtSignal(bool)
+    read_reply_requested = pyqtSignal(str)
     opened = pyqtSignal()
     closed = pyqtSignal()
 
@@ -412,12 +416,17 @@ class ChatDrawer(QWidget):
         recent_workspaces: list[str] | None = None,
         width: int = 440,
         height: int = 560,
+        show_thoughts: bool = True,
+        text_size: int = 13,
+        reduced_motion: bool = False,
+        drop_shadow: bool = True,
     ) -> None:
         super().__init__(None)
         self._always_on_top = always_on_top
         self._launch_at_startup = launch_at_startup
         self._theme_mode = theme_mode
         self._backdrop_blur = backdrop_blur
+        self._drop_shadow = drop_shadow
         self._voice_enabled = voice_enabled
         self._voice_name = voice_name
         self._check_updates_on_startup = check_updates_on_startup
@@ -430,7 +439,12 @@ class ChatDrawer(QWidget):
         self._busy = False
         self._session_ready = False
         self._status_text = "Connecting..."
-        self._show_thoughts = True
+        self._show_thoughts = show_thoughts
+        self._text_size = text_size
+        self._reduced_motion = reduced_motion
+        self._connection_state = "connecting"
+        self._review_from_settings = False
+        self._settings_focus: QWidget | None = None
         self._drag_offset: QPoint | None = None
         self._manually_moved = False
         self._is_at_bottom = True
@@ -452,17 +466,24 @@ class ChatDrawer(QWidget):
         self._animator = WindowAnimator(self)
         self._build_ui(agents, current_agent_id, workspace)
         self.apply_theme()
+        self.set_reduced_motion(reduced_motion)
 
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(35)
         self._render_timer.timeout.connect(self._render_transcript_now)
+        self._auto_hide_timer = QTimer(self)
+        self._auto_hide_timer.setSingleShot(True)
+        self._auto_hide_timer.setInterval(4000)
+        self._auto_hide_timer.timeout.connect(self._hide_if_inactive)
 
     def _use_native_blur(self) -> bool:
         return self._backdrop_blur and os.name == "nt"
 
     def _init_window_flags(self) -> None:
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        if not self._drop_shadow:
+            flags |= Qt.WindowType.NoDropShadowWindowHint
         if self._always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
@@ -481,7 +502,11 @@ class ChatDrawer(QWidget):
         self._init_window_flags()
         if was_visible:
             self.show()
+            self.raise_()
+            self.activateWindow()
             self._apply_backdrop_now()
+            if self.isActiveWindow():
+                self._auto_hide_timer.stop()
 
     def set_theme(self, mode: str, blur: bool) -> None:
         """Switch Dark/Light/System theme and Acrylic blur dynamically."""
@@ -497,7 +522,31 @@ class ChatDrawer(QWidget):
             self._init_window_flags()
             if was_visible:
                 self.show()
+                self.raise_()
+                self.activateWindow()
+                self._apply_backdrop_now()
+                if self.isActiveWindow():
+                    self._auto_hide_timer.stop()
         self.apply_theme()
+
+    def set_drop_shadow(self, enabled: bool) -> None:
+        if enabled == self._drop_shadow:
+            return
+        self._drop_shadow = enabled
+        if hasattr(self, "_settings_page"):
+            self._settings_page.set_drop_shadow(enabled)
+        focused = self.focusWidget()
+        was_visible = self.isVisible()
+        self._init_window_flags()
+        if was_visible:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            self._apply_backdrop_now()
+            if self.isActiveWindow():
+                self._auto_hide_timer.stop()
+            if focused is not None:
+                focused.setFocus()
 
     def set_voice_enabled(self, enabled: bool) -> None:
         """Sync voice-enabled toggle on the settings page."""
@@ -525,6 +574,7 @@ class ChatDrawer(QWidget):
                 is_dark=pal.is_dark,
                 blur=self._backdrop_blur,
                 tint_rgba=pal.bg_tint_rgba,
+                drop_shadow=self._drop_shadow,
             )
 
     def _build_ui(self, agents: list[AgentSpec], current_agent_id: str, workspace: str) -> None:
@@ -578,23 +628,27 @@ class ChatDrawer(QWidget):
         self._new_btn.clicked.connect(self._on_new_chat_clicked)
         hl.addWidget(self._new_btn)
 
-        self._settings_btn = _HeaderIconButton("settings", "Settings", self._header_bar)
-        self._settings_btn.clicked.connect(self.toggle_settings)
-        hl.addWidget(self._settings_btn)
-
         self._more_btn = _HeaderIconButton("more-vertical", "More options", self._header_bar)
         self._more_btn.clicked.connect(self._show_more_menu)
         hl.addWidget(self._more_btn)
-
-        self._min_btn = _HeaderIconButton("minimize-2", "Minimize", self._header_bar)
-        self._min_btn.clicked.connect(self._on_close_clicked)
-        hl.addWidget(self._min_btn)
 
         self._close_btn = _HeaderIconButton("x", "Hide drawer", self._header_bar)
         self._close_btn.clicked.connect(self._on_close_clicked)
         hl.addWidget(self._close_btn)
 
         root.addWidget(self._header_bar)
+
+        self._notice = QFrame()
+        nl = QHBoxLayout(self._notice)
+        nl.setContentsMargins(12, 3, 10, 3)
+        self._notice_text = QLabel()
+        self._notice_text.setTextFormat(Qt.TextFormat.PlainText)
+        self._notice_text.setWordWrap(True)
+        nl.addWidget(self._notice_text, 1)
+        self._notice_action = QPushButton()
+        self._notice_action.clicked.connect(self._act_on_notice)
+        nl.addWidget(self._notice_action)
+        root.addWidget(self._notice)
 
         # ---- Stacked Pages (0 = Chat, 1 = Settings) ----
         self._pages = QStackedWidget(self)
@@ -705,7 +759,7 @@ class ChatDrawer(QWidget):
         toolbar.addWidget(self._usage_label)
 
         self._send_btn = QPushButton(self._input_box)
-        self._send_btn.setFixedSize(26, 26)
+        self._send_btn.setFixedSize(32, 32)
         self._send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._send_btn.clicked.connect(self._on_send_or_stop_clicked)
         toolbar.addWidget(self._send_btn)
@@ -721,10 +775,10 @@ class ChatDrawer(QWidget):
             voice_name=self._voice_name,
             theme_mode=self._theme_mode,
             backdrop_blur=self._backdrop_blur,
+            drop_shadow=self._drop_shadow,
             always_on_top=self._always_on_top,
             launch_at_startup=self._launch_at_startup,
             show_thoughts=self._show_thoughts,
-            workspace=workspace,
             start_without_project=self._start_without_project,
             check_updates_on_startup=self._check_updates_on_startup,
             parent=self._pages,
@@ -740,8 +794,10 @@ class ChatDrawer(QWidget):
         self._settings_page.startup_toggled.connect(self.startup_toggled.emit)
         self._settings_page.thoughts_toggled.connect(self._on_toggle_thoughts)
         self._settings_page.start_without_project_toggled.connect(self._on_start_without_project_toggled)
-        self._settings_page.workspace_browse_requested.connect(self._pick_workspace)
-        self._settings_page.workspace_clear_requested.connect(self._clear_workspace)
+        self._settings_page.setup_requested.connect(self.setup_guide_requested)
+        self._settings_page.reconnect_requested.connect(self.reconnect_requested)
+        self._settings_page.set_agents(agents, "")
+        self._settings_page.set_readability(self._text_size, self._reduced_motion)
         self._settings_page.auto_update_toggled.connect(self.auto_update_toggled.emit)
         self._settings_page.check_updates_requested.connect(self.check_updates_requested.emit)
         self._settings_page.apply_update_requested.connect(self.update_action_requested.emit)
@@ -783,7 +839,14 @@ class ChatDrawer(QWidget):
             """
         )
 
-        for btn in (self._new_btn, self._settings_btn, self._more_btn, self._min_btn, self._close_btn):
+        self.setStyleSheet(f"QPushButton:focus {{ border: 2px solid {pal.accent}; }}")
+        self._notice.setStyleSheet(f"QFrame {{ background: {pal.bg_secondary}; color: {pal.text_normal}; }}")
+        self._notice_action.setStyleSheet(
+            f"QPushButton {{ background: {pal.bg_secondary}; color: {pal.text_normal}; "
+            f"border: 1px solid {pal.border}; border-radius: 5px; padding: 5px 9px; }}"
+            f"QPushButton:focus {{ border: 2px solid {pal.accent}; }}"
+        )
+        for btn in (self._new_btn, self._more_btn, self._close_btn):
             btn.apply_theme()
         self._settings_page.apply_theme()
 
@@ -868,8 +931,7 @@ class ChatDrawer(QWidget):
             self._cwd_btn.setText("No Project")
             self._cwd_btn.setIcon(lucide_icon("message-square", pal.text_faint, 12))
             self._cwd_btn.setToolTip("No project selected (general chat)\nClick to choose a project folder")
-        if hasattr(self, "_settings_page"):
-            self._settings_page.set_workspace(clean)
+        self._cwd_btn.setAccessibleName(f"Project: {clean or 'General chat'}")
 
     def set_start_without_project(self, enabled: bool) -> None:
         """Sync the start-without-project default toggle on the settings page."""
@@ -942,11 +1004,10 @@ class ChatDrawer(QWidget):
         self._status_text = text
         self._status_spinner.setToolTip(text)
         lower = text.lower()
-        is_ready = "connected" in lower or lower == "ready"
-        self._session_ready = is_ready or self._busy
+        is_ready = self._session_ready
         spinning = self._busy or "connecting" in lower
         if spinning:
-            self._status_spinner.set_icon("loader", pal.accent if self._busy else pal.yellow, True)
+            self._status_spinner.set_icon("loader", pal.accent if self._busy else pal.yellow, not self._reduced_motion)
         elif "error" in lower or "failed" in lower or "disconnected" in lower:
             self._status_spinner.set_icon("circle-alert", pal.red, False)
         elif "permission" in lower:
@@ -957,7 +1018,69 @@ class ChatDrawer(QWidget):
         if self._busy:
             loading_note = "Waiting for permission..." if "permission" in lower else ""
             self._loading_indicator.set_loading(True, loading_note)
+        self._refresh_notice()
         self._update_empty_state()
+
+    @property
+    def settings(self) -> SettingsPage:
+        return self._settings_page
+
+    def set_connection_state(self, state: str) -> None:
+        self._connection_state = state
+        self._session_ready = state == "connected"
+        if not self._session_ready:
+            self.set_busy(False)
+            self.clear_permission()
+        self._refresh_notice()
+        self._update_send_button()
+        self._update_empty_state()
+
+    @property
+    def permission_pending(self) -> bool:
+        return self._perm_dialog.current_request is not None
+
+    def _refresh_notice(self) -> None:
+        request = self._perm_dialog.current_request
+        if request:
+            message = f"Approval needed · {request.title}"
+            action = "Review" if self._pages.currentWidget() is self._settings_page else ""
+        elif self._connection_state == "disconnected":
+            message, action = "Disconnected", "Reconnect"
+        elif self._connection_state == "connecting":
+            message, action = "Connecting…", ""
+        else:
+            self._notice.hide()
+            return
+        self._notice_text.setAccessibleName(message)
+        self._notice_text.setToolTip(message)
+        extent = max(120, self.width() - (120 if action else 36))
+        self._notice_text.setText(self._notice_text.fontMetrics().elidedText(message, Qt.TextElideMode.ElideRight, extent))
+        self._notice_action.setText(action)
+        self._notice_action.setVisible(bool(action))
+        self._notice.show()
+
+    def _act_on_notice(self) -> None:
+        if self.permission_pending:
+            self._settings_focus = self._settings_page.focusWidget()
+            self._review_from_settings = self._pages.currentWidget() is self._settings_page
+            self._pages.setCurrentWidget(self._chat_page)
+            self._perm_dialog.setFocus(Qt.FocusReason.OtherFocusReason)
+            self._refresh_notice()
+        else:
+            self.reconnect_requested.emit()
+
+    def _after_permission_change(self) -> None:
+        if not self.permission_pending and self._review_from_settings:
+            self._review_from_settings = False
+            self._pages.setCurrentWidget(self._settings_page)
+            if self._settings_focus and self._settings_page.isAncestorOf(self._settings_focus):
+                self._settings_focus.setFocus()
+            else:
+                self._settings_page.focus_current()
+            self._settings_focus = None
+        self._refresh_notice()
+        if not self.permission_pending and self.isVisible() and not self.isActiveWindow():
+            self._auto_hide_timer.start()
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -1127,11 +1250,15 @@ class ChatDrawer(QWidget):
             diffs=diffs,
         )
         self._perm_dialog.enqueue(req)
+        self._auto_hide_timer.stop()
+        self._animator.cancel_hide()
+        self._refresh_notice()
         self.show()
         self.raise_()
 
     def clear_permission(self) -> None:
         self._perm_dialog.clear()
+        self._after_permission_change()
 
     def _decide_permission(self, option_id: str | None) -> None:
         self._perm_dialog.decide_current(option_id)
@@ -1167,7 +1294,16 @@ class ChatDrawer(QWidget):
         self._input.setFocus()
 
     def hide_animated(self) -> None:
+        self._auto_hide_timer.stop()
         self._animator.hide_animated(duration_ms=130, on_done=self.closed.emit)
+
+    def _hide_if_inactive(self) -> None:
+        if not self.isVisible() or self.isActiveWindow() or self.permission_pending:
+            return
+        if QApplication.activePopupWidget() or QApplication.activeModalWidget():
+            self._auto_hide_timer.start()
+            return
+        self.hide_animated()
 
     # ------------------------------------------------------------------
     # Toolbar Selectors (Model / Reasoning / Mode)
@@ -1254,13 +1390,17 @@ class ChatDrawer(QWidget):
         self._empty_label.setVisible(not has_turns)
         if not has_turns:
             agent_name = self._current_agent_name()
-            if not self._session_ready:
+            if self._connection_state == "disconnected":
+                self._empty_label.setText(f"Reconnect to chat with {agent_name}.")
+            elif not self._session_ready:
                 self._empty_label.setText(f"Connecting to {agent_name}...")
             else:
                 self._empty_label.setText(f"Start a conversation with {agent_name}...")
 
     def _append_turn_widget(self, turn: ChatTurn) -> None:
         widget = MessageBubbleWidget(turn, show_thoughts=self._show_thoughts, parent=self._messages_container)
+        widget.set_text_size(self._text_size)
+        widget.read_requested.connect(self.read_reply_requested)
         self._turn_widgets.append(widget)
         insert_idx = max(0, self._messages_layout.count() - 2)
         self._messages_layout.insertWidget(insert_idx, widget)
@@ -1310,6 +1450,17 @@ class ChatDrawer(QWidget):
     # Input, Toolbar & Menu Interactions
     # ------------------------------------------------------------------
 
+    def set_text_size(self, size: int) -> None:
+        self._text_size = size
+        for widget in self._turn_widgets:
+            widget.set_text_size(size)
+
+    def set_reduced_motion(self, enabled: bool) -> None:
+        self._reduced_motion = enabled
+        self._animator.reduced_motion = enabled
+        self._loading_indicator.set_reduced_motion(enabled)
+        self.set_status(self._status_text)
+
     def _on_input_text_changed(self) -> None:
         text = self._input.toPlainText()
         self._suggestion_popup.update_suggestions(self._commands, text)
@@ -1341,6 +1492,8 @@ class ChatDrawer(QWidget):
     def _update_send_button(self) -> None:
         pal = get_palette()
         has_text = bool(self._input.toPlainText().strip())
+        self._send_btn.setEnabled(self._busy or (self._session_ready and has_text))
+        self._send_btn.setAccessibleName("Stop generation" if self._busy else "Send message")
         if self._busy:
             self._send_btn.setIcon(lucide_icon("square", "#ffffff", 11))
             self._send_btn.setToolTip("Stop generation")
@@ -1348,7 +1501,7 @@ class ChatDrawer(QWidget):
                 f"QPushButton {{ background: {pal.red}; border: none; border-radius: 13px; }}"
                 "QPushButton:hover { background: #ef4444; }"
             )
-        elif has_text:
+        elif has_text and self._session_ready:
             self._send_btn.setIcon(lucide_icon("arrow-up", "#ffffff", 14))
             self._send_btn.setToolTip("Send message (Enter)")
             self._send_btn.setStyleSheet(
@@ -1357,7 +1510,7 @@ class ChatDrawer(QWidget):
             )
         else:
             self._send_btn.setIcon(lucide_icon("arrow-up", pal.text_faint, 14))
-            self._send_btn.setToolTip("Type a message")
+            self._send_btn.setToolTip("Type a message" if self._session_ready else "Connect an agent to send")
             self._send_btn.setStyleSheet(
                 f"QPushButton {{ background: {pal.bg_hover}; border: none; border-radius: 13px; }}"
             )
@@ -1382,12 +1535,6 @@ class ChatDrawer(QWidget):
         if folder:
             self.set_workspace(folder)
             self.workspace_selected.emit(folder)
-
-    def _clear_workspace(self) -> None:
-        if not self._workspace:
-            return
-        self.set_workspace("")
-        self.workspace_selected.emit("")
 
     def _select_workspace_direct(self, folder: str) -> None:
         if folder == self._workspace:
@@ -1422,12 +1569,6 @@ class ChatDrawer(QWidget):
                 )
         menu.addSeparator()
         menu.add_item("Choose Project Folder...", self._pick_workspace, icon="folder-open")
-        menu.addSeparator()
-        menu.add_check(
-            "Start without a project by default",
-            self._start_without_project,
-            self._on_start_without_project_toggled,
-        )
 
     def _show_project_menu(self) -> None:
         menu = PocketMenu(parent=self)
@@ -1455,30 +1596,8 @@ class ChatDrawer(QWidget):
     def _show_more_menu(self) -> None:
         menu = PocketMenu(parent=self)
 
-        menu.add_item("New Chat", self._on_new_chat_clicked, icon="plus")
-        menu.add_item("Reconnect Agent", self.reconnect_requested.emit, icon="refresh-cw")
-        menu.add_item("Connect an AI (Setup Guide)...", self.setup_guide_requested.emit, icon="book-open")
-        project_menu = menu.add_submenu("Project", "folder")
-        self._populate_project_menu(project_menu)
-        menu.add_item("Copy Chat as Markdown", self._export_markdown, icon="copy", enabled=bool(self._turns))
-        menu.add_check("Show Thinking Blocks", self._show_thoughts, self._on_toggle_thoughts)
-
-        menu.addSeparator()
-        theme_menu = menu.add_submenu("Appearance", "sun")
-        theme_group = QActionGroup(theme_menu)
-        for label, mode in [("Auto (Windows)", "system"), ("Dark", "dark"), ("Light", "light")]:
-            theme_menu.add_check(
-                label,
-                self._theme_mode == mode,
-                lambda _c=False, m=mode: self._emit_theme_mode(m),
-                group=theme_group,
-            )
-        theme_menu.addSeparator()
-        theme_menu.add_check("Translucent Blur (Acrylic)", self._backdrop_blur, self._emit_blur_toggle)
-        theme_menu.add_check("Always on Top", self._always_on_top, self._on_settings_always_on_top)
-
-        menu.add_item("Check for Updates...", self.check_updates_requested.emit, icon="refresh-cw")
-        menu.add_item("Settings...", self.open_settings, icon="settings")
+        menu.add_item("Settings…", self.open_settings, icon="settings")
+        menu.add_item("Copy chat as Markdown", self._export_markdown, icon="copy", enabled=bool(self._turns))
 
         hint = menu.sizeHint()
         anchor = self._more_btn.mapToGlobal(QPoint(self._more_btn.width() - hint.width(), self._more_btn.height() + 4))
@@ -1493,11 +1612,16 @@ class ChatDrawer(QWidget):
 
     def open_settings(self) -> None:
         """Show the settings page inside the drawer."""
+        self._review_from_settings = False
         self._pages.setCurrentWidget(self._settings_page)
+        self._settings_page.show_index()
+        self._refresh_notice()
 
     def close_settings(self) -> None:
         """Return from settings to the chat transcript."""
+        self._review_from_settings = False
         self._pages.setCurrentWidget(self._chat_page)
+        self._refresh_notice()
         self._input.setFocus()
 
     def _on_new_chat_clicked(self) -> None:
@@ -1526,13 +1650,14 @@ class ChatDrawer(QWidget):
 
     def _on_toggle_thoughts(self, checked: bool) -> None:
         self._show_thoughts = checked
+        self.thoughts_toggled.emit(checked)
         if hasattr(self, "_settings_page"):
             self._settings_page.set_show_thoughts(checked)
         for w in self._turn_widgets:
             w.set_show_thoughts(checked)
 
     def _submit_prompt(self, text: str) -> None:
-        if self._busy:
+        if self._busy or not self._session_ready:
             return
         self._input.clear()
         self._suggestion_popup.setVisible(False)
@@ -1550,6 +1675,7 @@ class ChatDrawer(QWidget):
                 self._submit_prompt(text)
 
     def _on_permission_widget_decided(self, request_id: str, option_id: object) -> None:
+        self._after_permission_change()
         self.permission_decided.emit(request_id, option_id)
 
     def _on_close_clicked(self) -> None:
@@ -1562,9 +1688,28 @@ class ChatDrawer(QWidget):
     def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._apply_backdrop_now()
+        if not self.permission_pending and not self.isActiveWindow():
+            self._auto_hide_timer.start()
         self.opened.emit()
 
+    def hideEvent(self, event) -> None:
+        self._auto_hide_timer.stop()
+        super().hideEvent(event)
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and self.isVisible():
+            if self.isActiveWindow():
+                self._auto_hide_timer.stop()
+                self._animator.cancel_hide()
+            elif not self.permission_pending:
+                self._auto_hide_timer.start()
+
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if event.key() == Qt.Key.Key_Escape and self._pages.currentWidget() is self._settings_page:
+            self._settings_page.navigate_back()
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Escape and self._error_banner.isVisible():
             self._error_banner.dismiss()
             event.accept()

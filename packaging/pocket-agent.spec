@@ -1,11 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for building the console-free Windows PocketAgent bundle."""
 
+import os
+import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files
 
 ROOT = Path(SPECPATH).resolve().parent
 ASSETS_DIR = ROOT / "pocket_agent" / "assets"
+
+if sys.platform == "win32":
+    # Bindepend also searches PATH. Developer tools can ship a different ICU ABI
+    # under the Windows system DLL name. Let package hooks locate their own DLLs.
+    windows = Path(os.environ["SystemRoot"])
+    os.environ["PATH"] = os.pathsep.join(map(str, (
+        windows / "System32", windows, Path(sys.executable).parent, Path(sys.base_prefix),
+    )))
 
 datas = [
     (str(ASSETS_DIR), "pocket_agent/assets"),

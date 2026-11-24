@@ -106,6 +106,7 @@ class LoadingIndicator(QWidget):
         layout.setContentsMargins(16, 10, 16, 10)
         layout.setSpacing(8)
 
+        self._reduced_motion = False
         self._grid = DotMatrixGrid(self)
         layout.addWidget(self._grid)
 
@@ -124,8 +125,12 @@ class LoadingIndicator(QWidget):
             f"color: {pal.text_muted}; font-size: 12px; font-style: italic; background: transparent;"
         )
 
+    def set_reduced_motion(self, enabled: bool) -> None:
+        self._reduced_motion = enabled
+        self._grid.set_active(not enabled and not self.isHidden())
+
     def set_loading(self, active: bool, status_text: str = "") -> None:
-        self._grid.set_active(active)
+        self._grid.set_active(active and not self._reduced_motion)
         if status_text:
             self._status.setText(status_text)
             self._status.setVisible(True)
@@ -296,6 +301,7 @@ class WindowAnimator:
 
     def __init__(self, widget: QWidget) -> None:
         self._widget = widget
+        self.reduced_motion = False
         self._anim: QParallelAnimationGroup | None = None
         self._fade_out_anim: QPropertyAnimation | None = None
         self._hiding = False
@@ -303,6 +309,13 @@ class WindowAnimator:
     def show_animated(self, slide_px: int = 10, duration_ms: int = 170, on_done=None) -> None:
         self._stop_all()
         self._hiding = False
+        if self.reduced_motion:
+            self._widget.setWindowOpacity(1.0)
+            self._widget.show()
+            self._widget.raise_()
+            if on_done:
+                on_done()
+            return
         target_pos = self._widget.pos()
         start_pos = QPoint(target_pos.x(), target_pos.y() + slide_px)
 
@@ -337,6 +350,12 @@ class WindowAnimator:
                 on_done()
             return
         self._stop_all()
+        if self.reduced_motion:
+            self._widget.hide()
+            self._widget.setWindowOpacity(1.0)
+            if on_done:
+                on_done()
+            return
         self._hiding = True
 
         fade = QPropertyAnimation(self._widget, b"windowOpacity", self._widget)
@@ -356,7 +375,13 @@ class WindowAnimator:
         self._fade_out_anim = fade
         fade.start()
 
+    def cancel_hide(self) -> None:
+        if self._hiding or self._fade_out_anim is not None:
+            self._stop_all()
+            self._widget.setWindowOpacity(1.0)
+
     def _stop_all(self) -> None:
+        self._hiding = False
         if self._anim is not None:
             self._anim.stop()
             self._anim = None

@@ -48,6 +48,10 @@ class SpeechBubble(QWidget):
         self._anchor_top_y = 0
         self.apply_theme()
 
+    def set_reduced_motion(self, enabled: bool) -> None:
+        self._animator.reduced_motion = enabled
+        self._status_label.set_active(self.is_status_active() and not enabled)
+
     def is_status_active(self) -> bool:
         return self._status_mode and self.isVisible()
 
@@ -94,11 +98,11 @@ class SpeechBubble(QWidget):
         already_showing = self._status_mode and self.isVisible()
         self._hide_timer.stop()
         if already_showing and clean == self._status_label.text():
-            self._status_label.set_active(True)
+            self._status_label.set_active(not self._animator.reduced_motion)
             return
         self._set_status_mode(True)
         self._status_label.set_text(clean)
-        self._status_label.set_active(True)
+        self._status_label.set_active(not self._animator.reduced_motion)
         self._status_label.adjustSize()
         self.adjustSize()
         self.reposition(anchor_center_x, anchor_top_y)

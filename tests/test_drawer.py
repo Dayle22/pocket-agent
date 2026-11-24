@@ -1,5 +1,7 @@
 """Tests for Obsidian Agent Client UI components, diffs, overlays, and animations."""
 
+from PyQt6.QtCore import QEvent, Qt
+
 from pocket_agent.acp_bridge import (
     AvailableCommandInfo,
     ConfigChoiceInfo,
@@ -91,6 +93,7 @@ def test_drawer_plan_commands_usage_and_streaming(qapp) -> None:
     drawer._input.setPlainText("/pl")
     assert drawer._suggestion_popup.isVisible() is True
 
+    drawer.set_connection_state("connected")
     drawer._submit_prompt("Hello")
     drawer.append_thought_chunk("Thinking deeply...")
     drawer.start_tool_call(
@@ -106,6 +109,137 @@ def test_drawer_plan_commands_usage_and_streaming(qapp) -> None:
 
     assert drawer._turns[-1].text == "Done!"
     assert drawer._turns[-1].tools[0].status == "completed"
+
+
+def test_review_from_settings_restores_section_after_last_request(qapp) -> None:
+    drawer = ChatDrawer(agents=list(BUILTIN_AGENTS), current_agent_id="agy", workspace="")
+    drawer.show()
+    drawer.set_connection_state("connected")
+    drawer.open_settings()
+    drawer.settings.open_section("Voice")
+    section = drawer.settings._stack.currentWidget()
+    drawer._input.setPlainText("Unsent draft")
+    decisions = []
+    drawer.permission_decided.connect(lambda rid, oid: decisions.append((rid, oid)))
+    for rid in ("first", "second"):
+        drawer.show_permission_request(rid, f"Edit {rid}", "edit", [])
+    assert drawer._pages.currentWidget() is drawer.settings
+    assert drawer._notice_action.isVisible()
+    assert "Edit first" in drawer._notice_text.text()
+    drawer._notice_action.click()
+    assert drawer._perm_dialog.isVisible()
+    drawer._decide_permission(None)
+    assert drawer._pages.currentWidget() is drawer._chat_page
+    assert "Edit second" in drawer._notice_text.text()
+    drawer._decide_permission(None)
+    assert decisions == [("first", None), ("second", None)]
+    assert drawer._pages.currentWidget() is drawer.settings
+    assert drawer.settings._stack.currentWidget() is section
+    assert drawer._input.toPlainText() == "Unsent draft"
+    assert drawer._notice.isHidden()
+    drawer.close()
+
+
+def test_disconnect_during_review_preserves_draft_and_offers_reconnect(qapp) -> None:
+    drawer = ChatDrawer(agents=list(BUILTIN_AGENTS), current_agent_id="agy", workspace="")
+    drawer.show()
+    drawer.open_settings()
+    drawer.show_permission_request("one", "Edit a file", "edit", [])
+    drawer._notice_action.click()
+    drawer.set_connection_state("disconnected")
+    assert drawer._pages.currentWidget() is drawer.settings
+    assert not drawer.permission_pending
+    assert drawer._notice_action.text() == "Reconnect"
+    reconnects = []
+    drawer.reconnect_requested.connect(lambda: reconnects.append(True))
+    drawer._notice_action.click()
+    drawer.close_settings()
+    drawer._on_agent_selected("agy")
+    assert len(reconnects) == 2
+    drawer._input.setPlainText("Keep this draft")
+    drawer._input.submitted.emit("Keep this draft")
+    assert drawer._input.toPlainText() == "Keep this draft"
+    assert not drawer._send_btn.isEnabled()
+    drawer.set_connection_state("connected")
+    assert drawer._send_btn.isEnabled()
+    drawer.close()
+
+
+def test_drawer_auto_hides_only_when_inactive_and_no_approval_is_pending(qapp, monkeypatch) -> None:
+    drawer = ChatDrawer(list(BUILTIN_AGENTS), "agy", "", reduced_motion=True)
+    monkeypatch.setattr(drawer, "isActiveWindow", lambda: False)
+    drawer.show()
+    assert drawer._auto_hide_timer.isActive()
+    assert drawer._auto_hide_timer.interval() == 4000
+    drawer._input.setPlainText("Keep this draft")
+
+    monkeypatch.setattr(drawer, "isActiveWindow", lambda: True)
+    drawer.changeEvent(QEvent(QEvent.Type.ActivationChange))
+    assert not drawer._auto_hide_timer.isActive()
+    drawer._hide_if_inactive()
+    assert drawer.isVisible()
+
+    monkeypatch.setattr(drawer, "isActiveWindow", lambda: False)
+    drawer.changeEvent(QEvent(QEvent.Type.ActivationChange))
+    assert drawer._auto_hide_timer.isActive()
+    drawer.show_permission_request("sample", "Edit a file", "edit", [])
+    drawer._hide_if_inactive()
+    assert drawer.isVisible()
+    drawer.clear_permission()
+    assert drawer._auto_hide_timer.isActive()
+    drawer._hide_if_inactive()
+    assert not drawer.isVisible()
+    assert drawer._input.toPlainText() == "Keep this draft"
+
+
+def test_drop_shadow_flag_updates_open_drawer(qapp, monkeypatch) -> None:
+    drawer = ChatDrawer(list(BUILTIN_AGENTS), "agy", "")
+    drawer.show()
+    monkeypatch.setattr(drawer, "isActiveWindow", lambda: True)
+    drawer.set_drop_shadow(False)
+    assert drawer.isVisible()
+    assert drawer.windowFlags() & Qt.WindowType.NoDropShadowWindowHint
+    assert not drawer.settings._drop_shadow_cb.isChecked()
+    assert not drawer._auto_hide_timer.isActive()
+    drawer.set_drop_shadow(True)
+    assert drawer.isVisible()
+    assert not drawer.windowFlags() & Qt.WindowType.NoDropShadowWindowHint
+    assert drawer.settings._drop_shadow_cb.isChecked()
+    assert not drawer._auto_hide_timer.isActive()
+    drawer.close()
+
+
+def test_permission_request_cancels_inflight_fade_out(qapp) -> None:
+    from PyQt6.QtTest import QTest
+
+    drawer = ChatDrawer(list(BUILTIN_AGENTS), "agy", "", reduced_motion=False)
+    drawer.show()
+    drawer.hide_animated()
+    assert drawer._animator._hiding is True
+    drawer.show_permission_request("late-req", "Run command", "execute", [])
+    assert drawer._animator._hiding is False
+    assert drawer.windowOpacity() == 1.0
+    QTest.qWait(180)
+    assert drawer.isVisible()
+    assert drawer.windowOpacity() == 1.0
+    drawer.close()
+
+
+def test_review_from_settings_restores_focusable_widget_after_notice_click(qapp) -> None:
+    drawer = ChatDrawer(list(BUILTIN_AGENTS), "agy", "")
+    drawer.show()
+    drawer.set_connection_state("connected")
+    drawer.open_settings()
+    drawer.settings.open_section("Voice")
+    drawer.show_permission_request("req-focus", "Edit file", "edit", [])
+    # Clicking the notice button moves focus to _notice_action outside _settings_page
+    drawer._notice_action.setFocus()
+    drawer._notice_action.click()
+    drawer._decide_permission(None)
+    assert drawer._pages.currentWidget() is drawer.settings
+    assert drawer.focusWidget() is drawer.settings._index_btn
+    assert drawer.settings._index_btn.focusPolicy() != Qt.FocusPolicy.NoFocus
+    drawer.close()
 
 
 def test_animations_widgets_tick_cleanly(qapp) -> None:
@@ -188,6 +322,7 @@ def test_drawer_light_dark_and_blur_switching(qapp) -> None:
     assert get_palette() == LIGHT_PALETTE
     assert drawer._backdrop_blur is True
 
+    drawer.set_connection_state("connected")
     drawer._submit_prompt("Hello light world")
     drawer.append_message_chunk("Hi there!")
     drawer._render_transcript_now()

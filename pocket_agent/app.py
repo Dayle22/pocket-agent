@@ -10,10 +10,10 @@ import os
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QAbstractNativeEventFilter, QByteArray, QObject, QTimer, QUrl
+from PyQt6.QtCore import QAbstractNativeEventFilter, QByteArray, QObject, Qt, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from PyQt6.QtWidgets import QApplication, QFileDialog
+from PyQt6.QtWidgets import QApplication
 
 from pocket_agent.acp_bridge import AcpBridge, ModeInfo
 from pocket_agent.agents import AgentRegistry
@@ -24,9 +24,11 @@ from pocket_agent.config import (
     resolve_session_cwd,
     set_launch_at_startup,
 )
-from pocket_agent.engine.catalog import BUILTIN_ASSETS_DIR, PetCatalog
+from pocket_agent.engine.catalog import BUILTIN_ASSETS_DIR, PetCatalog, ensure_pocketbot_sheet
 from pocket_agent.engine.fsm import PetState
 from pocket_agent.engine.orbkit import CUSTOM_ORBS_DIR
+from pocket_agent.engine.orbs import OrbPlayer
+from pocket_agent.engine.spritesheet import SpriteSheet
 from pocket_agent.ui.drawer import ChatDrawer
 from pocket_agent.ui.orbkit_dialog import OrbkitManagerDialog
 from pocket_agent.ui.pet_window import PetWindow
@@ -94,6 +96,10 @@ class _WindowsHotkeyFilter(QAbstractNativeEventFilter):
             except Exception:
                 self._registered = False
 
+    @property
+    def registered(self) -> bool:
+        return self._registered
+
     def unregister(self) -> None:
         if os.name == "nt" and self._registered:
             try:
@@ -122,15 +128,18 @@ class PocketAgentApp(QObject):
         self.qt_app = qt_app
         self.config = AppConfig.load()
         self.registry = AgentRegistry(self.config.custom_agents)
-        self.catalog = PetCatalog(self.config.pets_dirs, custom_orbs_dir=CUSTOM_ORBS_DIR)
+        self.catalog = PetCatalog(
+            self.config.pets_dirs, custom_orbs_dir=CUSTOM_ORBS_DIR, active_pet_id=self.config.pet_id,
+        )
         self.bridge = AcpBridge(self)
         self.updater = UpdateManager(self)
         self._latest_release: ReleaseInfo | None = None
 
         # Pick saved agent if available, else first available preset
-        current_spec = self.registry.get(self.config.agent_id)
+        current_spec = self.registry.get(self.config.default_agent_id or self.config.agent_id)
         if current_spec is None or not current_spec.is_available():
             current_spec = self.registry.default_available()
+        if current_spec.id != self.config.agent_id:
             self.config.agent_id = current_spec.id
             self.config.save()
 
@@ -170,6 +179,7 @@ class PocketAgentApp(QObject):
             launch_at_startup=launch_at_startup,
             theme_mode=self.config.theme,
             backdrop_blur=self.config.backdrop_blur,
+            drop_shadow=self.config.drop_shadow,
             voice_enabled=self.config.voice_enabled,
             voice_name=self.config.voice_name,
             check_updates_on_startup=self.config.check_updates_on_startup,
@@ -177,8 +187,14 @@ class PocketAgentApp(QObject):
             recent_workspaces=self._existing_recent_workspaces(),
             width=self.config.drawer_width,
             height=self.config.drawer_height,
+            show_thoughts=self.config.show_thoughts,
+            text_size=self.config.chat_text_size,
+            reduced_motion=self.config.reduced_motion,
         )
 
+        self.drawer.settings.set_agents(self.registry.all(), self.config.default_agent_id)
+        self._sync_picker()
+        self.drawer.settings.set_idle_animation(not self.config.static_idle)
         self._wire_signals()
 
         self._hotkey_filter = _WindowsHotkeyFilter(self._toggle_drawer)
@@ -186,7 +202,9 @@ class PocketAgentApp(QObject):
 
         self.pet.show()
         self.drawer.dock_near(self.pet.frameGeometry(), force=True)
-        self.pet.say("Click me or press Ctrl+Shift+Space to chat!", 3200)
+        self.drawer.settings.set_shortcut_available(self._hotkey_filter.registered)
+        greeting = "Click me or press Ctrl+Shift+Space to chat!" if self._hotkey_filter.registered else "Click me to chat!"
+        self.pet.say(greeting, 3200)
 
         self._connect_current_agent()
         if self.config.check_updates_on_startup:
@@ -197,24 +215,16 @@ class PocketAgentApp(QObject):
         self.pet.toggle_drawer_requested.connect(self._toggle_drawer)
         self.pet.bubble.clicked.connect(self._open_drawer_from_bubble)
         self.pet.moved.connect(lambda rect: self.drawer.dock_near(rect))
-        self.pet.agent_selected.connect(self._switch_agent)
         self.pet.new_session_requested.connect(self._new_session)
         self.pet.reconnect_requested.connect(self._reconnect_agent)
         self.pet.setup_guide_requested.connect(self._open_setup_guide)
         self.pet.settings_requested.connect(self._open_settings)
-        self.pet.manage_orbs_requested.connect(self._open_orbkit_manager)
+        self.pet.show_chat_requested.connect(self._open_chat)
+        self.pet.companion_requested.connect(self._open_companion)
         self.pet.check_updates_requested.connect(self._check_updates_manual)
-        self.pet.workspace_change_requested.connect(self._prompt_workspace)
-        self.pet.workspace_selected.connect(self._switch_workspace)
-        self.pet.workspace_clear_requested.connect(lambda: self._switch_workspace(""))
-        self.pet.start_without_project_toggled.connect(self._set_start_without_project)
         self.pet.always_on_top_changed.connect(self.drawer.set_always_on_top)
         self.pet.startup_toggled.connect(self._set_launch_at_startup)
-        self.pet.theme_selected.connect(self._set_theme_mode)
-        self.pet.blur_toggled.connect(self._set_backdrop_blur)
         self.pet.voice_toggled.connect(self._set_voice_enabled)
-        self.pet.voice_selected.connect(self._set_voice_name)
-        self.pet.stop_speaking_requested.connect(self.voice.stop)
         self.pet.exit_requested.connect(self.quit)
 
         # Drawer interactions
@@ -246,6 +256,17 @@ class PocketAgentApp(QObject):
         self.drawer.update_action_requested.connect(self._on_update_action_requested)
         self.drawer.release_notes_requested.connect(self._on_release_notes_requested)
         self.drawer.manage_orbs_requested.connect(self._open_orbkit_manager)
+        self.drawer.thoughts_toggled.connect(self._set_show_thoughts)
+        self.drawer.read_reply_requested.connect(self.voice.speak_text)
+        settings = self.drawer.settings
+        settings.default_agent_selected.connect(self._set_default_agent)
+        settings.log_requested.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(_LOG_FILE))))
+        settings.text_size_changed.connect(self._set_text_size)
+        settings.reduced_motion_toggled.connect(self._set_reduced_motion)
+        settings.drop_shadow_toggled.connect(self._set_drop_shadow)
+        settings.idle_animation_toggled.connect(self.pet.set_idle_animation)
+        settings.picker.selected.connect(self.pet._load_pet)
+        settings.picker.size_changed.connect(self.pet._set_scale_and_save)
 
         # Updater -> Drawer
         self.updater.check_started.connect(self._on_update_check_started)
@@ -276,6 +297,8 @@ class PocketAgentApp(QObject):
 
         # Voice engine -> Pet orb
         self.voice.speaking_started.connect(self._on_voice_started)
+        self.voice.speaking_started.connect(lambda: self.drawer.settings.set_speaking(True))
+        self.voice.speaking_stopped.connect(lambda: self.drawer.settings.set_speaking(False))
         self.voice.speaking_stopped.connect(self._on_voice_stopped)
         self.voice.pulse_requested.connect(self.pet.pulse_orb_level)
         self.voice.audio_level_updated.connect(self.pet.set_orb_audio_level)
@@ -321,7 +344,7 @@ class PocketAgentApp(QObject):
 
     def _on_permission_resolved(self, request_id: str, option_id: object) -> None:
         self.bridge.resolve_permission(request_id, option_id)
-        self._waiting_permission = False
+        self._waiting_permission = self.drawer.permission_pending
         self._sync_working_bubble()
 
     def _existing_recent_workspaces(self) -> list[str]:
@@ -336,6 +359,7 @@ class PocketAgentApp(QObject):
                 "`codex-acp`, `opencode`, or `claude-agent-acp`) or add a custom preset in "
                 "~/.pocket-agent/config.json."
             )
+        self.drawer.set_connection_state("connecting")
         self.bridge.connect_agent(spec, cwd)
 
     def _switch_agent(self, agent_id: str) -> None:
@@ -344,7 +368,6 @@ class PocketAgentApp(QObject):
             return
         self.config.agent_id = spec.id
         self.config.save()
-        self.pet.current_agent_id = spec.id
         self.drawer.select_agent_in_combo(spec.id)
         self.drawer.set_config_options([])
         self.drawer.clear_chat()
@@ -360,32 +383,21 @@ class PocketAgentApp(QObject):
 
         recent = self._existing_recent_workspaces()
         self.drawer.set_workspace(clean, recent_workspaces=recent)
-        self.pet.set_active_workspace(clean, recent_workspaces=recent)
         self._new_session()
         if clean:
             self.drawer.add_system_message(f"Project switched to {clean}")
         else:
             self.drawer.add_system_message("Switched to No Project (general chat)")
 
-    def _prompt_workspace(self) -> None:
-        start_dir = (
-            self._active_workspace
-            or (self._existing_recent_workspaces()[0] if self._existing_recent_workspaces() else "")
-            or str(Path.home())
-        )
-        folder = QFileDialog.getExistingDirectory(self.drawer, "Choose Project Folder", start_dir)
-        if folder:
-            self._switch_workspace(folder)
-
     def _set_start_without_project(self, enabled: bool) -> None:
         self.config.start_without_project = enabled
         self.config.save()
         self.drawer.set_start_without_project(enabled)
-        self.pet.set_start_without_project(enabled)
 
     def _new_session(self) -> None:
         self.drawer.clear_chat()
         cwd = resolve_session_cwd(self._active_workspace)
+        self.drawer.set_connection_state("connecting")
         self.bridge.new_session(cwd)
 
     def _reconnect_agent(self) -> None:
@@ -405,7 +417,50 @@ class PocketAgentApp(QObject):
     def _open_settings(self) -> None:
         if not self.drawer.isVisible():
             self._toggle_drawer()
+        else:
+            self.drawer.raise_()
+            self.drawer.activateWindow()
         self.drawer.open_settings()
+
+    def _open_chat(self) -> None:
+        self.drawer.close_settings()
+        self.show_drawer()
+
+    def _open_companion(self) -> None:
+        self._open_settings()
+        self.drawer.settings.open_section("Companion")
+
+    def _sync_picker(self) -> None:
+        self.drawer.settings.picker.set_companions(
+            self.catalog.all(), self.config.pet_id, self.config.pet_scale, drop_shadow=self.config.drop_shadow,
+        )
+
+    def _set_default_agent(self, agent_id: str) -> None:
+        self.config.default_agent_id = agent_id
+        self.config.save()
+
+    def _set_show_thoughts(self, enabled: bool) -> None:
+        self.config.show_thoughts = enabled
+        self.config.save()
+
+    def _set_text_size(self, size: int) -> None:
+        self.config.chat_text_size = size
+        self.config.save()
+        self.drawer.set_text_size(size)
+
+    def _set_reduced_motion(self, enabled: bool) -> None:
+        self.config.reduced_motion = enabled
+        self.config.save()
+        self.pet.set_reduced_motion(enabled)
+        self.drawer.set_reduced_motion(enabled)
+        self.drawer.settings.set_readability(self.config.chat_text_size, enabled)
+
+    def _set_drop_shadow(self, enabled: bool) -> None:
+        self.config.drop_shadow = enabled
+        self.config.save()
+        self.drawer.set_drop_shadow(enabled)
+        self.pet.update_drop_shadow()
+        self.drawer.settings.picker.set_drop_shadow(enabled)
 
     def _open_orbkit_manager(self) -> None:
         dlg = OrbkitManagerDialog(
@@ -416,6 +471,7 @@ class PocketAgentApp(QObject):
         dlg.orbs_changed.connect(self.pet.reload_catalog)
         dlg.orb_selected.connect(self._select_pet_orb)
         dlg.exec()
+        self._sync_picker()
 
     def _select_pet_orb(self, orb_id: str) -> None:
         self.pet.reload_catalog()
@@ -485,6 +541,11 @@ class PocketAgentApp(QObject):
             self.drawer.show_update_banner(result.release.version, frozen=frozen)
             return
 
+        if result.latest_version is None:
+            self.drawer.set_update_status("Last check unavailable", busy=False,
+                                          update_available=self._latest_release is not None,
+                                          is_frozen=is_frozen())
+            return
         self._latest_release = None
         self.drawer.set_update_status("Up to date", busy=False, update_available=False)
         if not result.silent and result.latest_version:
@@ -564,6 +625,7 @@ class PocketAgentApp(QObject):
             self.pet.set_state(PetState.IDLE, orb_state="idle")
 
     def _on_connecting(self, agent_name: str) -> None:
+        self.drawer.set_connection_state("connecting")
         self.drawer.set_status(f"Connecting to {agent_name}...", "#f59e0b")
         self.pet.set_state(PetState.THINKING, orb_state="connecting")
 
@@ -578,6 +640,7 @@ class PocketAgentApp(QObject):
     ) -> None:
         ver = f" {agent_version}" if agent_version else ""
         self.drawer._error_banner.setVisible(False)
+        self.drawer.set_connection_state("connected")
         self.drawer.set_status(f"Connected · {agent_name}{ver}", "#34d399")
         self.drawer.set_modes(modes, current_mode)
         self.drawer.add_system_message(f"Connected to {agent_name}{ver}")
@@ -588,6 +651,7 @@ class PocketAgentApp(QObject):
         self._waiting_permission = False
         self._sync_working_bubble()
         self.drawer.set_busy(False)
+        self.drawer.set_connection_state("disconnected")
         self.drawer.set_status(f"Disconnected: {reason}", "#f87171")
         if reason and reason != "Session closed":
             self.drawer.show_connection_error("Agent Disconnected", reason)
@@ -595,6 +659,7 @@ class PocketAgentApp(QObject):
 
     def _on_connection_failed(self, error: str) -> None:
         self.drawer.set_busy(False)
+        self.drawer.set_connection_state("disconnected")
         self.drawer.set_status("Connection failed", "#f87171")
         self.drawer.show_connection_error("Connection Failed", error)
         self.pet.set_state(PetState.ERROR, "Couldn't reach agent!", 3200, orb_state="error")
@@ -612,8 +677,6 @@ class PocketAgentApp(QObject):
         self.drawer.append_thought_chunk(text)
         self.pet.set_state(PetState.THINKING, orb_state="thinking")
         self.pet.pulse_orb_level(0.45)
-        if self._waiting_permission:
-            self._waiting_permission = False
         self._set_working_phase("thinking")
 
     def _on_message_chunk(self, text: str) -> None:
@@ -622,8 +685,6 @@ class PocketAgentApp(QObject):
         self.pet.set_state(PetState.CODING, orb_state="speaking")
         if not self.voice.is_speaking:
             self.pet.pulse_orb_level(0.85)
-        if self._waiting_permission:
-            self._waiting_permission = False
         self._set_working_phase("responding")
 
     def _on_tool_started(self, tool_call_id: str, title: str, kind: str, status: str, details: object) -> None:
@@ -637,8 +698,6 @@ class PocketAgentApp(QObject):
         self.drawer.set_status(f"Running: {title}", "#7f6df2")
         self.pet.set_state(PetState.CODING, orb_state="speaking")
         self.pet.pulse_orb_level(0.7)
-        if self._waiting_permission:
-            self._waiting_permission = False
         self._set_working_phase(_tool_phase_for(kind, title))
 
     def _on_tool_updated(self, tool_call_id: str, title: str, kind: str, status: str, details: object) -> None:
@@ -654,9 +713,14 @@ class PocketAgentApp(QObject):
         self._turn_active = False
         self._waiting_permission = False
         self._sync_working_bubble()
-        self.voice.flush()
         self.drawer.set_busy(False)
         self.drawer.clear_permission()
+        if stop_reason == "cancelled":
+            self.voice.stop()
+            self.drawer.set_status("Stopped")
+            self.pet.set_state(PetState.IDLE, "Stopped", 1600, orb_state="idle")
+            return
+        self.voice.flush()
         self.drawer.set_status("Ready", "#4ade80")
         bubble = "Done!" if not self.drawer.isVisible() else None
         self.pet.set_state(PetState.CELEBRATE, bubble, 2000, orb_state="speaking")
@@ -753,8 +817,42 @@ def create_instance_server(
     return server
 
 
+def _run_smoke_test() -> int:
+    """Exercise packaged Qt plugins, assets, orb rendering, voice, and IPC without touching user state."""
+    qt_app = QApplication(sys.argv)
+    icon = QIcon(str(BUILTIN_ASSETS_DIR / "pocket_agent.ico"))
+    if icon.isNull():
+        raise RuntimeError("Failed to load pocket_agent.ico")
+
+    for shadow in (True, False):
+        sheet_path = ensure_pocketbot_sheet(drop_shadow=shadow)
+        SpriteSheet(sheet_path)
+
+    PetCatalog([])
+    orb_pix = OrbPlayer("siri-sheet", drop_shadow=False).current_pixmap()
+    if orb_pix is None or orb_pix.isNull():
+        raise RuntimeError("Failed to render siri-sheet orb")
+
+    voice = VoiceEngine(enabled=False)
+    try:
+        bridge = AcpBridge()
+        server = QLocalServer()
+        server.close()
+        drawer = ChatDrawer(agents=[], current_agent_id="", workspace="")
+        drawer.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        drawer.open_settings()
+        drawer.show()
+        QTimer.singleShot(0, qt_app.quit)
+        return qt_app.exec()
+    finally:
+        voice.shutdown()
+
+
 def main() -> int:
     """Launch Pocket Agent desktop application."""
+    if sys.argv[1:] == ["--smoke-test"]:
+        return _run_smoke_test()
+
     _configure_logging()
     qt_app = QApplication(sys.argv)
     qt_app.setQuitOnLastWindowClosed(False)

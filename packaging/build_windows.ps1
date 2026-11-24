@@ -38,6 +38,10 @@ $ZipName = "PocketAgent-v$Version-win64.zip"
 $ZipPath = Join-Path $DistDir $ZipName
 $ShaPath = "$ZipPath.sha256"
 
+Write-Host "Checking that the packaged application opens its Qt interface..."
+& $Python -c "import subprocess, sys; subprocess.run([sys.argv[1], '--smoke-test'], check=True, timeout=30)" (Join-Path $BundleDir "PocketAgent.exe")
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
 Compress-Archive -Path (Join-Path $BundleDir "*") -DestinationPath $ZipPath -CompressionLevel Optimal
 

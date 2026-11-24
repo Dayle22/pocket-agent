@@ -36,7 +36,7 @@ def pil_image_to_qpixmap(pil_img: Image.Image) -> QPixmap:
     return QPixmap.fromImage(qimg)
 
 
-def generate_pocketbot_sheet(target_path: Path) -> Path:
+def generate_pocketbot_sheet(target_path: Path, *, drop_shadow: bool = True) -> Path:
     """Generate a clean 8x9 (1536x1872) PocketBot spritesheet PNG if missing."""
     target_path.parent.mkdir(parents=True, exist_ok=True)
     sheet = Image.new("RGBA", (COLUMNS * CELL_WIDTH, ROWS * CELL_HEIGHT), (0, 0, 0, 0))
@@ -44,14 +44,14 @@ def generate_pocketbot_sheet(target_path: Path) -> Path:
     for action, (row, durations) in ACTION_SPECS.items():
         count = len(durations)
         for col in range(count):
-            cell = _draw_pocketbot_frame(action, col, count)
+            cell = _draw_pocketbot_frame(action, col, count, drop_shadow=drop_shadow)
             sheet.paste(cell, (col * CELL_WIDTH, row * CELL_HEIGHT))
 
     sheet.save(target_path, format="PNG")
     return target_path
 
 
-def _draw_pocketbot_frame(action: PetAction, col: int, total: int) -> Image.Image:
+def _draw_pocketbot_frame(action: PetAction, col: int, total: int, *, drop_shadow: bool) -> Image.Image:
     """Render one 192x208 frame of the built-in PocketBot companion at 2x supersampling."""
     scale = 2
     w, h = CELL_WIDTH * scale, CELL_HEIGHT * scale
@@ -100,11 +100,12 @@ def _draw_pocketbot_frame(action: PetAction, col: int, total: int) -> Image.Imag
     cy = int(h * 0.56) + bob_y
 
     # Soft ground shadow
-    shadow_alpha = max(35, 90 - abs(bob_y) // 2)
-    draw.ellipse(
-        [w // 2 - 42 * scale, int(h * 0.86), w // 2 + 42 * scale, int(h * 0.92)],
-        fill=(10, 14, 24, shadow_alpha),
-    )
+    if drop_shadow:
+        shadow_alpha = max(35, 90 - abs(bob_y) // 2)
+        draw.ellipse(
+            [w // 2 - 42 * scale, int(h * 0.86), w // 2 + 42 * scale, int(h * 0.92)],
+            fill=(10, 14, 24, shadow_alpha),
+        )
 
     # Subtle outer aura behind head
     draw.ellipse(

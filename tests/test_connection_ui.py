@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
+from types import SimpleNamespace
 
-from pocket_agent.acp_bridge import _format_connection_error
+from pocket_agent.acp_bridge import AcpBridge, _format_connection_error
 from pocket_agent.agents import BUILTIN_AGENTS, AgentSpec
 from pocket_agent.ui.drawer import ChatDrawer
 from pocket_agent.ui.overlays import ErrorBannerWidget
@@ -89,3 +92,129 @@ def test_agent_setup_dialog_lists_agents_and_emits_connect(qapp, tmp_path) -> No
 
     dlg.deleteLater()
     qapp.processEvents()
+
+
+def _pump_until(qapp, predicate, timeout_s: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_switching_agent_during_slow_handshake_cancels_previous_attempt(qapp, monkeypatch, tmp_path) -> None:
+    import pocket_agent.acp_bridge as acp_mod
+
+    exe_a = tmp_path / "agent-a.exe"
+    exe_b = tmp_path / "agent-b.exe"
+    exe_a.write_text("stub", encoding="utf-8")
+    exe_b.write_text("stub", encoding="utf-8")
+    spec_a = AgentSpec(id="agent-a", name="Agent A", command=str(exe_a))
+    spec_b = AgentSpec(id="agent-b", name="Agent B", command=str(exe_b))
+
+    @contextlib.asynccontextmanager
+    async def _fake_spawn(_client, exe, *_args, **_kwargs):
+        is_a = exe == str(exe_a)
+        stop_proc = asyncio.Event()
+
+        class _FakeProc:
+            stderr = None
+
+            async def wait(self) -> int:
+                await stop_proc.wait()
+                return 0
+
+        class _FakeConn:
+            async def initialize(self, **_kw):
+                if is_a:
+                    await asyncio.Event().wait()
+                return SimpleNamespace(
+                    agent_info=SimpleNamespace(name="Agent B", version="1.0"),
+                )
+
+            async def new_session(self, **_kw):
+                return SimpleNamespace(
+                    session_id="sess-b",
+                    modes=None,
+                    config_options=None,
+                )
+
+        try:
+            yield _FakeConn(), _FakeProc()
+        finally:
+            stop_proc.set()
+
+    monkeypatch.setattr(acp_mod, "_spawn_agent_process", _fake_spawn)
+
+    bridge = AcpBridge()
+    connecting: list[str] = []
+    connected: list[str] = []
+    failed: list[str] = []
+    disconnected: list[str] = []
+    bridge.connecting.connect(connecting.append)
+    bridge.connected.connect(lambda aid, *_rest: connected.append(aid))
+    bridge.connection_failed.connect(failed.append)
+    bridge.disconnected.connect(disconnected.append)
+
+    try:
+        bridge.connect_agent(spec_a, str(tmp_path))
+        assert _pump_until(qapp, lambda: "Agent A" in connecting)
+
+        bridge.connect_agent(spec_b, str(tmp_path))
+        assert _pump_until(qapp, lambda: "agent-b" in connected)
+        qapp.processEvents()
+
+        assert connected == ["agent-b"]
+        assert failed == []
+        assert disconnected == []
+
+        # Verify no lingering _connect_async tasks remain on the bridge loop
+        fut = asyncio.run_coroutine_threadsafe(
+            asyncio.sleep(0),
+            bridge._loop,
+        )
+        fut.result(timeout=1.0)
+        assert bridge._connect_task is not None and bridge._connect_task.done()
+        assert bridge._session_task is not None and not bridge._session_task.done()
+    finally:
+        bridge.shutdown()
+
+
+def test_shutdown_during_slow_handshake_exits_promptly(qapp, monkeypatch, tmp_path) -> None:
+    import pocket_agent.acp_bridge as acp_mod
+
+    exe_a = tmp_path / "slow-agent.exe"
+    exe_a.write_text("stub", encoding="utf-8")
+    spec_a = AgentSpec(id="slow-agent", name="Slow Agent", command=str(exe_a))
+
+    @contextlib.asynccontextmanager
+    async def _fake_spawn(_client, _exe, *_args, **_kwargs):
+        class _FakeProc:
+            stderr = None
+
+            async def wait(self) -> int:
+                await asyncio.Event().wait()
+                return 0
+
+        class _FakeConn:
+            async def initialize(self, **_kw):
+                await asyncio.Event().wait()
+
+        yield _FakeConn(), _FakeProc()
+
+    monkeypatch.setattr(acp_mod, "_spawn_agent_process", _fake_spawn)
+
+    bridge = AcpBridge()
+    connecting: list[str] = []
+    bridge.connecting.connect(connecting.append)
+
+    bridge.connect_agent(spec_a, str(tmp_path))
+    assert _pump_until(qapp, lambda: "Slow Agent" in connecting)
+
+    t0 = time.monotonic()
+    bridge.shutdown()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.5
+    assert not bridge._thread.isRunning()

@@ -135,7 +135,7 @@ def test_working_bubble_only_shows_when_drawer_minimised(qapp, monkeypatch, tmp_
         assert app.pet.bubble._label.text() == "Need your OK!"
 
         # Resolving permission keeps working bubble hidden while drawer remains open
-        app._on_permission_resolved("req-1", "allow_once")
+        app.drawer._decide_permission("allow_once")
         assert not app.pet.bubble.is_status_active()
 
         # Minimising the drawer again restores the working bubble

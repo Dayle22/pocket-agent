@@ -358,6 +358,16 @@ class VoiceEngine(QObject):
         if cleaned:
             self._enqueue_sentence(cleaned)
 
+    def speak_text(self, text: str) -> None:
+        """Stop current speech and read an arbitrary reply aloud in sentence chunks."""
+        self.stop()
+        if not text:
+            return
+        for sentence in self._buffer.feed(text):
+            self._enqueue_sentence(sentence)
+        for sentence in self._buffer.flush():
+            self._enqueue_sentence(sentence)
+
     def stop(self) -> None:
         """Interrupt active speech and discard any queued or in-flight sentences."""
         self._generation_id += 1
@@ -531,7 +541,8 @@ class VoiceEngine(QObject):
         return b"".join(chunks)
 
     def _on_audio_ready(self, gen_id: int, audio_data: object) -> None:
-        if gen_id != self._generation_id or not self._enabled:
+        # Automatic speech is gated at enqueue. Explicit previews and read-aloud still play.
+        if gen_id != self._generation_id:
             return
         if not isinstance(audio_data, (bytes, bytearray)) or not audio_data:
             return

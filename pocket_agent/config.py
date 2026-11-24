@@ -124,12 +124,17 @@ class AppConfig:
     static_idle: bool = False
     theme: str = "system"  # "dark" | "light" | "system"
     backdrop_blur: bool = True
+    drop_shadow: bool = True
     pet_scale: float = 0.4
     drawer_width: int = 440
     drawer_height: int = 560
     pet_x: int | None = None
     pet_y: int | None = None
-    voice_enabled: bool = True
+    default_agent_id: str = ""
+    show_thoughts: bool = True
+    chat_text_size: int = 13
+    reduced_motion: bool = False
+    voice_enabled: bool = False
     voice_name: str = "en-ZA-LeahNeural"
     check_updates_on_startup: bool = True
     custom_agents: list[dict[str, Any]] = field(default_factory=list)
@@ -147,10 +152,15 @@ class AppConfig:
         except Exception:
             return cls()
 
+        if not isinstance(raw, dict):
+            return cls()
         defaults = asdict(cls())
         merged = {k: raw.get(k, v) for k, v in defaults.items()}
         merged["workspace"] = str(merged.get("workspace") or "").strip()
         merged["start_without_project"] = bool(merged.get("start_without_project", True))
+        merged["drop_shadow"] = bool(merged.get("drop_shadow", True))
+        if merged["chat_text_size"] not in (13, 15, 17):
+            merged["chat_text_size"] = 13
         raw_recent = merged.get("recent_workspaces")
         merged["recent_workspaces"] = (
             [str(p).strip() for p in raw_recent if isinstance(p, str) and str(p).strip()]

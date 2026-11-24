@@ -21,10 +21,10 @@ Pocket Agent is powered by the **Agent Client Protocol (ACP)**, animated PyQt6 s
 
 ## Features
 - **Always-accessible floating companion** with transparent PyQt6 rendering, working status bubble, and real-time ACP lifecycle animations (`Thinking`, `Coding/Tools`, `Permission Request`, `Celebrate`, `Error`).
-- **4 built-in GLSL Voice Orbs** (`Siri Sheet`, `Aura Field`, `Iridescent Flow`, `Duotone Flow`) running the WebGL shaders from [`amunozdev/voiceorbs`](https://github.com/amunozdev/voiceorbs) via PyQt6 OpenGL, sharing a 7-state contract (`idle`, `connecting`, `listening`, `thinking`, `speaking`, `error`, `disabled`) and live audio reactivity (`Right-click -> Voice Orb`).
+- **4 built-in GLSL Voice Orbs** (`Siri Sheet`, `Aura Field`, `Iridescent Flow`, `Duotone Flow`) running the WebGL shaders from [`amunozdev/voiceorbs`](https://github.com/amunozdev/voiceorbs) via PyQt6 OpenGL, sharing a 7-state contract (`idle`, `connecting`, `listening`, `thinking`, `speaking`, `error`, `disabled`) and live audio reactivity (`Right-click pet → Change companion`).
 - **Voice responses (Edge TTS)** with sentence-streaming playback and South African, UK, and US neural voice presets.
 - **Pop-out ACP chat drawer** (`click pet` or `Ctrl+Shift+Space`) with Auto/Dark/Light themes, Windows 11 Acrylic blur, streaming Markdown replies, collapsible agent thoughts, live tool-call diffs, slash commands, mode/model switching, workspace picker, Markdown export, and inline tool permission prompts.
-- **Built-in PocketBot sprite** plus automatic discovery of 192x208 8x9 sprite packs (configure `pets_dirs` in `~/.pocket-agent/config.json`).
+- **Built-in PocketBot sprite** plus a small selection from the auto-discovered Antigravity sprite library. Add your own 192x208 8x9 sprite packs through `pets_dirs` in `~/.pocket-agent/config.json`.
 - **System tray + Windows Startup toggle** so Pocket Agent runs quietly in the background without keeping a terminal open.
 
 ![4 built-in GPU GLSL Voice Orbs](docs/voice-orbs.png)
@@ -34,7 +34,7 @@ Pocket Agent is powered by the **Agent Client Protocol (ACP)**, animated PyQt6 s
 1. Download the latest `PocketAgent-v*-win64.zip` from [**GitHub Releases**](https://github.com/Dayle22/pocket-agent/releases/latest).
 2. Extract the zip anywhere (for example `C:\Apps\PocketAgent\`).
 3. Double-click **`PocketAgent.exe`** (no Python install or terminal window required).
-4. *(Optional)* Enable **Launch at Windows Startup** from the system tray menu or **Settings**.
+4. *(Optional)* Enable **Launch at Windows Startup** from the system tray menu or **Settings → General**.
 
 > **Windows SmartScreen notice:** Because `PocketAgent.exe` is an unsigned open-source build, Windows Defender SmartScreen may show *"Windows protected your PC"* on first launch. Click **More info -> Run anyway**, and feel free to verify your download against the `.sha256` file attached to each release:
 > ```powershell
@@ -58,17 +58,20 @@ Pocket Agent is a desktop UI client: it connects to an AI CLI installed on your 
 | **Claude Code (ACP)** (`claude-agent-acp`) | `npm install -g @anthropic-ai/claude-code @zed-industries/claude-agent-acp` | Run `claude` once to sign in |
 
 ### 2. Switch or reconnect inside Pocket Agent
-- **Switch agent:** Click the agent name pill in the chat drawer header (or `Right-click pet -> AI Agent`).
+- **Switch agent:** Click the agent name pill in the chat drawer header.
 - **If it fails to connect on launch:**
-  1. Click **Reconnect** right on the error banner (or `Right-click pet -> AI Agent -> Reconnect Agent`).
-  2. Click **Setup Guide** on the error banner (or `... -> Connect an AI (Setup Guide)...`) to see which CLIs Pocket Agent detected on your PC and switch to an available one.
+  1. Click **Reconnect** right on the error banner (or choose **Settings → Agent & chat → Reconnect current agent**).
+  2. Click **Setup Guide** on the error banner (or **Settings → Agent & chat → Connect an agent**) to see which CLIs Pocket Agent detected on your PC and switch to an available one.
   3. If your login token expired or the CLI hung during startup, run that CLI once in PowerShell (for example `agy` or `gemini`), complete any sign-in prompt, then click **Reconnect**.
   4. Check `%USERPROFILE%\.pocket-agent\pocket-agent.log` for exact CLI stderr output.
 
 ## Controls
 - **Left-click pet:** Open or hide the ACP chat drawer
+- **Auto-hide:** The drawer hides after four seconds out of focus and stays open for pending approvals.
 - **Drag pet:** Reposition anywhere on screen (drawer docks cleanly beside it)
-- **Right-click pet:** Switch AI agent, switch character, switch Voice Orb, toggle voice/size/theme, open Settings, or Quit
+- **Right-click pet:** Open chat, mute automatic replies, change companion, open Settings, or quit.
+- **Settings:** Open the drawer’s **⋮ → Settings** for agent and startup preferences, companion previews and size, online voice, appearance, and diagnostics. Use the project button in the chat header to change the current folder.
+- **Voice:** Read an individual assistant reply aloud, or enable automatic reading in **Settings → Voice**. Microsoft processes the text you choose to hear.
 - **`Ctrl+Shift+Space`:** Global hotkey to toggle and focus the chat drawer
 
 ## Configuration (`~/.pocket-agent/config.json`)

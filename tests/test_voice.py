@@ -61,6 +61,33 @@ def test_voice_engine_toggle_and_stop(qapp) -> None:
         engine.shutdown()
 
 
+def test_on_request_voice_plays_only_explicit_text(qapp, monkeypatch) -> None:
+    engine = VoiceEngine(enabled=False)
+    queued = []
+    monkeypatch.setattr(engine, "_enqueue_sentence", queued.append)
+    monkeypatch.setattr(engine, "_play_next", lambda: None)
+    try:
+        engine.feed_chunk("An automatic reply.")
+        engine.flush()
+        assert queued == []
+        engine.speak_sample("Read this reply.")
+        assert queued == ["Read this reply."]
+        generation = engine._generation_id
+        engine._on_audio_ready(generation, b"requested")
+        assert list(engine._play_queue) == [b"requested"]
+        engine.stop()
+        engine._on_audio_ready(generation, b"stale")
+        assert list(engine._play_queue) == []
+        assert not engine.enabled
+
+        queued.clear()
+        engine.speak_text("First sentence. Second sentence.")
+        assert queued == ["First sentence.", "Second sentence."]
+        assert not engine.enabled
+    finally:
+        engine.shutdown()
+
+
 def test_compute_buffer_level_handles_silence_speech_and_invalid(qapp) -> None:
     assert compute_buffer_level(QAudioBuffer()) == 0.0
 

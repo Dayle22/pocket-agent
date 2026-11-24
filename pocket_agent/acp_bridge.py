@@ -477,6 +477,8 @@ class AcpBridge(QObject):
 
         self._conn: Any = None
         self._session_id: str | None = None
+        self._connection_gen: int = 0
+        self._connect_task: asyncio.Task[None] | None = None
         self._session_task: asyncio.Task[None] | None = None
         self._prompt_task: asyncio.Task[None] | None = None
         self._stop_session_event: asyncio.Event | None = None
@@ -518,12 +520,25 @@ class AcpBridge(QObject):
             loop.close()
 
     async def _shutdown_async(self) -> None:
+        self._connection_gen += 1
+        if self._connect_task is not None and not self._connect_task.done():
+            self._connect_task.cancel()
+            with contextlib.suppress(BaseException):
+                await self._connect_task
+        self._connect_task = None
         await self._close_session_async()
 
     def connect_agent(self, spec: AgentSpec, cwd: str) -> None:
         self.start()
         assert self._loop is not None
-        asyncio.run_coroutine_threadsafe(self._connect_async(spec, cwd), self._loop)
+        self._loop.call_soon_threadsafe(self._start_connect_on_loop, spec, cwd)
+
+    def _start_connect_on_loop(self, spec: AgentSpec, cwd: str) -> None:
+        self._connection_gen += 1
+        gen = self._connection_gen
+        if self._connect_task is not None and not self._connect_task.done():
+            self._connect_task.cancel()
+        self._connect_task = asyncio.create_task(self._connect_async(spec, cwd, gen))
 
     def send_prompt(self, text: str) -> None:
         if not text.strip():
@@ -603,29 +618,35 @@ class AcpBridge(QObject):
         if self._stop_session_event is not None:
             self._stop_session_event.set()
         if self._session_task and not self._session_task.done():
-            try:
-                await asyncio.wait_for(self._session_task, timeout=4.0)
-            except BaseException:
+            if self._session_id is None:
                 self._session_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(self._session_task, timeout=2.0)
+            else:
                 try:
-                    await self._session_task
+                    await asyncio.wait_for(self._session_task, timeout=4.0)
                 except BaseException:
-                    pass
+                    self._session_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await self._session_task
         self._session_task = None
         self._stop_session_event = None
         self._conn = None
         self._session_id = None
 
-    async def _connect_async(self, spec: AgentSpec, cwd: str) -> None:
+    async def _connect_async(self, spec: AgentSpec, cwd: str, gen: int) -> None:
         await self._close_session_async()
+        if gen != self._connection_gen:
+            return
         self._current_spec = spec
         self._current_cwd = cwd
 
         exe = spec.resolve_executable()
         if not exe:
-            self.connection_failed.emit(
-                f"'{spec.command}' was not found on PATH. Install it or choose another agent."
-            )
+            if gen == self._connection_gen:
+                self.connection_failed.emit(
+                    f"'{spec.command}' was not found on PATH. Install it or choose another agent."
+                )
             return
 
         self.connecting.emit(spec.name)
@@ -633,13 +654,19 @@ class AcpBridge(QObject):
         self._stop_session_event = stop_event
         ready_fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
-        self._session_task = asyncio.create_task(
-            self._session_runner(spec, exe, cwd, stop_event, ready_fut)
+        session_task = asyncio.create_task(
+            self._session_runner(spec, exe, cwd, stop_event, ready_fut, gen)
         )
+        self._session_task = session_task
         try:
             await ready_fut
+        except asyncio.CancelledError:
+            if not session_task.done():
+                session_task.cancel()
+            raise
         except Exception as exc:
-            self.connection_failed.emit(str(exc))
+            if gen == self._connection_gen:
+                self.connection_failed.emit(str(exc))
 
     async def _session_runner(
         self,
@@ -648,6 +675,7 @@ class AcpBridge(QObject):
         cwd: str,
         stop_event: asyncio.Event,
         ready_fut: asyncio.Future[None],
+        gen: int,
     ) -> None:
         client = _PocketAcpClient(self)
         env = dict(os.environ)
@@ -698,15 +726,16 @@ class AcpBridge(QObject):
 
                 if not ready_fut.done():
                     ready_fut.set_result(None)
-                self.connected.emit(
-                    spec.id,
-                    agent_name,
-                    agent_version,
-                    sess.session_id,
-                    modes_list,
-                    current_mode,
-                )
-                self.config_options_updated.emit(config_opts)
+                if gen == self._connection_gen:
+                    self.connected.emit(
+                        spec.id,
+                        agent_name,
+                        agent_version,
+                        sess.session_id,
+                        modes_list,
+                        current_mode,
+                    )
+                    self.config_options_updated.emit(config_opts)
 
                 stop_task = asyncio.create_task(stop_event.wait())
                 proc_task = asyncio.create_task(proc.wait())
@@ -726,31 +755,38 @@ class AcpBridge(QObject):
                             f"{spec.name} exited unexpectedly (code {rc}).",
                             stderr_lines,
                         )
-                        self.disconnected.emit(err_msg)
+                        if gen == self._connection_gen:
+                            self.disconnected.emit(err_msg)
                         return
                 finally:
                     for t in (stop_task, proc_task):
                         if not t.done():
                             t.cancel()
         except asyncio.CancelledError:
+            if not ready_fut.done():
+                ready_fut.cancel()
             raise
         except Exception as exc:
             msg = _format_connection_error(spec, exc, stderr_lines)
             logger.warning("ACP connection failed for %s: %s", spec.id, msg)
             if not ready_fut.done():
                 ready_fut.set_exception(RuntimeError(msg))
-            else:
+            elif gen == self._connection_gen:
                 self.disconnected.emit(msg)
             return
         finally:
+            if not ready_fut.done():
+                ready_fut.cancel()
             if stderr_task is not None and not stderr_task.done():
                 stderr_task.cancel()
                 with contextlib.suppress(BaseException):
                     await stderr_task
-            self._conn = None
-            self._session_id = None
+            if gen == self._connection_gen:
+                self._conn = None
+                self._session_id = None
 
-        self.disconnected.emit("Session closed")
+        if gen == self._connection_gen:
+            self.disconnected.emit("Session closed")
 
     async def _send_prompt_async(self, text: str) -> None:
         if self._conn is None or not self._session_id:

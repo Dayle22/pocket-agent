@@ -8,6 +8,8 @@ import sys
 import uuid
 from pathlib import Path
 
+from PIL import Image
+
 from pocket_agent import __version__
 from pocket_agent.acp_bridge import _subprocess_creation_flags
 from pocket_agent.app import create_instance_server, try_notify_existing_instance
@@ -17,8 +19,12 @@ from pocket_agent.ui.settings_page import SettingsPage
 
 
 def test_builtin_assets_include_spritesheet_and_icon() -> None:
-    assert (BUILTIN_ASSETS_DIR / "pocketbot_sheet.png").is_file()
-    assert (BUILTIN_ASSETS_DIR / "pocket_agent.ico").is_file()
+    with Image.open(BUILTIN_ASSETS_DIR / "pocketbot_sheet.png") as sprite:
+        assert sprite.getpixel((96, 186))[3] > 0
+    with Image.open(BUILTIN_ASSETS_DIR / "pocket_agent.ico") as icon:
+        assert {(16, 16), (32, 32), (48, 48), (256, 256)} <= icon.ico.sizes()
+    with Image.open(BUILTIN_ASSETS_DIR / "pocketbot_no_shadow.png") as sprite:
+        assert sprite.getpixel((96, 186))[3] == 0
 
 
 def test_resolve_builtin_assets_dir_uses_meipass_when_frozen(monkeypatch, tmp_path) -> None:
@@ -81,6 +87,29 @@ def test_settings_page_startup_toggle_and_version_label(qapp) -> None:
     assert page._startup_cb.isChecked() is False
     assert toggled == [True]
     assert f"v{__version__}" in page._version_lbl.text()
-
     page.deleteLater()
     qapp.processEvents()
+
+
+def test_config_persists_drop_shadow_and_coerces_non_bool(tmp_path: Path) -> None:
+    from pocket_agent.config import AppConfig
+
+    cfg_path = tmp_path / "config.json"
+    cfg = AppConfig(drop_shadow=False)
+    cfg.save(cfg_path)
+    reloaded = AppConfig.load(cfg_path)
+    assert reloaded.drop_shadow is False
+
+    cfg_path.write_text('{"drop_shadow": 0}', encoding="utf-8")
+    coerced = AppConfig.load(cfg_path)
+    assert coerced.drop_shadow is False
+
+
+def test_smoke_test_cli_exits_zero() -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "pocket_agent", "--smoke-test"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert proc.returncode == 0, proc.stderr
